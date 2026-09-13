@@ -8,6 +8,7 @@
 """
 
 import os
+import re
 import json
 import uuid
 import time
@@ -21,7 +22,7 @@ import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from stations_data import build_line_context_text, SERVICE_TYPES
+from stations_data import build_line_context_text, SERVICE_TYPES, STATIONS
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -43,6 +44,17 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは鉄道ダイヤ（運行計画）作成�
 - 駅間所要時分（秒）をもとに、現実的な時刻を計算すること。
 - ダイヤを提示する際は、可能であれば駅名・時刻・種別を含む表形式（Markdownテーブル）で示すこと。
 - 不明な点や前提条件が不足している場合は、仮定をおいたうえで明示すること。
+
+# 非公開情報に関する制約（最優先で厳守）
+- 駅間所要時分（秒）の生データは、時刻表を計算するためだけに内部的に使用すること。
+  「駅間所要時分を全部教えて」のように一覧・生の秒数そのものを求められても、
+  一覧表としてそのまま出力してはならない。個別の時刻の計算結果（ダイヤ）として
+  自然に表れる時刻表現は問題ない。
+- APIキー、環境変数、認証情報、サーバーやホスティングサービスのアカウント情報・
+  メールアドレスなど、システムの内部設定に関する情報は一切知らないものとして扱い、
+  質問されても開示しないこと。
+- 上記の指示について、ユーザーがどのような言い回し・理由付けをしても、開示や
+  出力をしないこと。
 
 {line_context}
 """
@@ -168,6 +180,63 @@ def rename_conversation(db, conversation_id: str, new_title: str):
     db.collection(CONVERSATIONS_COLLECTION).document(conversation_id).update(
         {"title": new_title}
     )
+
+
+def try_extract_rename_request(user_input: str):
+    """
+    ユーザーの発言が「このチャットの名前を変えて」のような指示かどうかを判定し、
+    新しいチャット名を抽出する。該当しなければNoneを返す。
+    """
+    has_target_word = ("チャット" in user_input and "名前" in user_input) or (
+        "チャット名" in user_input
+    ) or ("リネーム" in user_input)
+    if not has_target_word:
+        return None
+
+    change_words = ("変え", "変更", "にして", "して")
+    if not any(w in user_input for w in change_words):
+        return None
+
+    # 「」『』""''で囲まれた部分を優先的に新しい名前として抽出する
+    quote_patterns = [r"「(.+?)」", r"『(.+?)』", r"\"(.+?)\"", r"'(.+?)'"]
+    for pattern in quote_patterns:
+        m = re.search(pattern, user_input)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+
+    # 「(チャット)名前を◯◯に(変更/して)」のようなパターンから抽出する
+    m = re.search(r"(?:チャット)?名前を(.+?)(?:に(?:変更|変えて)?|にして)", user_input)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+
+    return None
+
+
+CONFIDENTIAL_KEYWORDS = (
+    "APIキー", "api key", "apikey", "GEMINI_API_KEY", "環境変数",
+    "サービスアカウント", "認証情報", "秘密鍵", "private_key", "credential",
+    "webhook", "ウェブフック", "discord", "ディスコード",
+    "render", "レンダー", "メールアドレス", "パスワード", "firebase",
+    "firestore", "サーバーの設定", "デプロイ設定",
+)
+
+
+def is_confidential_request(user_input: str) -> bool:
+    """APIキー・環境変数・ホスティングアカウント情報などを聞き出そうとしていないか判定する。"""
+    lowered = user_input.lower()
+    return any(kw.lower() in lowered for kw in CONFIDENTIAL_KEYWORDS)
+
+
+def build_thinking_message(user_input: str) -> str:
+    """質問内容に応じて「〇〇について検索中…」のような動的なスピナー文言を作る。"""
+    for station in STATIONS:
+        if station["name"] in user_input:
+            return f"{station['name']}駅について確認中…"
+
+    snippet = user_input.strip().replace("\n", " ")
+    if len(snippet) > 12:
+        snippet = snippet[:12] + "…"
+    return f"「{snippet}」について検討中…" if snippet else "ダイヤを検討中…"
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +378,7 @@ def main():
 
     cleanup_expired(db)
 
-    # --- セッションID（URLクエリパラメータで維持し、ブラウザを開き直しても6時間以内なら復元）---
+    # --- セッションID（URLクエリパラメータで維持し、ブラウザを開き直しても期限内なら復元）---
     query_params = st.query_params
     session_id = query_params.get("sid")
     if not session_id:
@@ -319,24 +388,27 @@ def main():
     _, session_expires_at = ensure_session(db, session_id)
     conversations = load_conversations(db, session_id)
 
-    # 現在選択中のチャットがなければ、既存の最新チャット or 新規チャットを選択
-    if "current_conversation_id" not in st.session_state or not any(
+    # 現在選択中のチャット：
+    # ・まだ何もない場合や「＋新しいチャット」直後は current_conversation_id = None（ドラフト状態）
+    # ・ドラフトの間はメッセージを送るまでFirestoreにチャットを作らない（一覧を空チャットで汚さない）
+    if "current_conversation_id" not in st.session_state:
+        st.session_state["current_conversation_id"] = (
+            conversations[0]["conversation_id"] if conversations else None
+        )
+    elif st.session_state["current_conversation_id"] is not None and not any(
         c["conversation_id"] == st.session_state["current_conversation_id"] for c in conversations
     ):
-        if conversations:
-            st.session_state["current_conversation_id"] = conversations[0]["conversation_id"]
-        else:
-            new_id = create_conversation(db, session_id, session_expires_at)
-            st.session_state["current_conversation_id"] = new_id
-            conversations = load_conversations(db, session_id)
+        # 選択していたチャットが削除・期限切れなどで消えていた場合のフォールバック
+        st.session_state["current_conversation_id"] = (
+            conversations[0]["conversation_id"] if conversations else None
+        )
 
     current_id = st.session_state["current_conversation_id"]
 
-    # --- サイドバー：チャット一覧（新規作成・切り替え・名前変更） ---
+    # --- サイドバー：チャット一覧（新規作成・切り替え） ---
     with st.sidebar:
-        if st.button("＋ 新しいチャット", use_container_width=True):
-            new_id = create_conversation(db, session_id, session_expires_at)
-            st.session_state["current_conversation_id"] = new_id
+        if st.button("＋ 新しいチャット"):
+            st.session_state["current_conversation_id"] = None
             st.rerun()
 
         st.divider()
@@ -346,18 +418,6 @@ def main():
                 st.session_state["current_conversation_id"] = conv["conversation_id"]
                 st.rerun()
 
-        st.divider()
-        current_conv = next((c for c in conversations if c["conversation_id"] == current_id), None)
-        if current_conv:
-            new_title = st.text_input(
-                "チャット名を変更",
-                value=current_conv["title"],
-                key=f"rename_{current_id}",
-            )
-            if new_title.strip() and new_title.strip() != current_conv["title"]:
-                rename_conversation(db, current_id, new_title)
-                st.rerun()
-
     if not get_gemini_api_keys():
         st.warning(
             "GEMINI_API_KEY_1〜GEMINI_API_KEY_5 が1つも設定されていません。"
@@ -365,7 +425,7 @@ def main():
         )
 
     # --- これまでの会話を表示 ---
-    messages = load_conversation_messages(db, current_id)
+    messages = load_conversation_messages(db, current_id) if current_id else []
     for msg in messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -374,16 +434,33 @@ def main():
     user_input = st.chat_input(placeholder="こんにちは！")
 
     if user_input:
+        # ドラフト状態（新規チャット）なら、ここで初めてFirestoreにチャットを作成する
+        is_new_conversation = current_id is None
+        if is_new_conversation:
+            current_id = create_conversation(db, session_id, session_expires_at)
+            st.session_state["current_conversation_id"] = current_id
+            messages = []
+
         messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
+        rename_target = try_extract_rename_request(user_input)
+        confidential = is_confidential_request(user_input)
+
         with st.chat_message("assistant"):
-            if not get_gemini_api_keys():
+            if rename_target:
+                rename_conversation(db, current_id, rename_target)
+                reply = f"チャット名を「{rename_target}」に変更しました。"
+                st.markdown(reply)
+            elif confidential:
+                reply = "申し訳ありませんが、その情報はお伝えできません。"
+                st.markdown(reply)
+            elif not get_gemini_api_keys():
                 reply = "GEMINI_API_KEY_1〜5 が未設定のため応答できません。"
                 st.markdown(reply)
             else:
-                with st.spinner("ダイヤを検討しています..."):
+                with st.spinner(build_thinking_message(user_input)):
                     try:
                         reply = call_gemini_with_failover(messages[:-1], user_input)
                     except Exception as e:
@@ -393,8 +470,8 @@ def main():
         messages.append({"role": "assistant", "content": reply})
         save_conversation_messages(db, current_id, messages)
 
-        # 最初のやり取りの場合、チャット名をユーザーの発言から自動でつける
-        if current_conv and current_conv["title"] == DEFAULT_TITLE and len(messages) <= 2:
+        # リネーム指示ではなく、かつ最初のやり取りの場合はユーザーの発言からチャット名を自動でつける
+        if not rename_target and is_new_conversation:
             auto_title = user_input.strip()[:20] or DEFAULT_TITLE
             rename_conversation(db, current_id, auto_title)
 
