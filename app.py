@@ -198,8 +198,9 @@ def rename_conversation(db, conversation_id: str, new_title: str):
 
 
 def is_oud2_export_request(user_input: str) -> bool:
-    """「oud2にして」「.oud2で出力して」のような指示かどうかを判定する。"""
-    has_target_word = ("oud2" in user_input.lower()) or ("ウーディア" in user_input) or ("OuDia" in user_input)
+    """「oud2にして」「oudiaファイルとして出力して」のような指示かどうかを判定する。"""
+    lowered = user_input.lower()
+    has_target_word = ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
     if not has_target_word:
         return False
     action_words = ("にして", "して", "出力", "作って", "変換", "エクスポート", "ください", "出して")
@@ -452,13 +453,18 @@ def main():
         st.session_state["editing_conversation_id"] = None
 
     # --- サイドバー：チャット一覧（新規作成・切り替え・✏️で名前変更） ---
+    if "menu_open_id" not in st.session_state:
+        st.session_state["menu_open_id"] = None
+
     with st.sidebar:
         if st.button("＋ 新しいチャット"):
             st.session_state["current_conversation_id"] = None
             st.session_state["editing_conversation_id"] = None
+            st.session_state["menu_open_id"] = None
             st.rerun()
 
         st.divider()
+        st.caption("チャット一覧")
 
         for conv in conversations:
             conv_id = conv["conversation_id"]
@@ -481,29 +487,24 @@ def main():
                         st.session_state["editing_conversation_id"] = None
                         st.rerun()
             else:
-                col_select, col_edit = st.columns([5, 1])
+                col_select, col_menu = st.columns([5, 1])
                 with col_select:
                     if st.button(conv["title"], key=f"select_{conv_id}", use_container_width=True):
                         st.session_state["current_conversation_id"] = conv_id
+                        st.session_state["menu_open_id"] = None
                         st.rerun()
-                with col_edit:
-                    if st.button("✏️", key=f"editbtn_{conv_id}"):
-                        st.session_state["editing_conversation_id"] = conv_id
+                with col_menu:
+                    if st.button("⋮", key=f"menubtn_{conv_id}"):
+                        st.session_state["menu_open_id"] = (
+                            None if st.session_state["menu_open_id"] == conv_id else conv_id
+                        )
                         st.rerun()
 
-        st.divider()
-        st.caption("OuDiaSecond形式で出力")
-        try:
-            oud2_bytes = get_cached_sample_oud2()
-            st.download_button(
-                "📥 サンプルダイヤを.oud2で出力",
-                data=oud2_bytes,
-                file_name="obakyu_sample.oud2",
-                mime="application/octet-stream",
-                use_container_width=True,
-            )
-        except Exception:
-            st.caption("（.oud2ファイルの生成に失敗しました）")
+                if st.session_state["menu_open_id"] == conv_id:
+                    if st.button("名前を変更", key=f"renamemenu_{conv_id}", use_container_width=True):
+                        st.session_state["editing_conversation_id"] = conv_id
+                        st.session_state["menu_open_id"] = None
+                        st.rerun()
 
     if not get_gemini_api_keys():
         st.warning(
