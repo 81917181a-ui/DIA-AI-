@@ -155,9 +155,9 @@ STATIONS = [
     {
         "code": "OB16",
         "name": "千鳥",
-        "facilities": "2面4線（3番線は尾羽原方面折り返し用、0番線は高速鉄道線方面）",
+        "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）",
         "stops": ALL_STOP,
-        "notes": "前方面（尾羽原方面）折り返し可能。",
+        "notes": "井問線と直通運転を行う。",
     },
 ]
 
@@ -184,6 +184,100 @@ RUN_TIMES_SEC = [
     60,   # 余美-千鳥
 ]
 
+# ---------------------------------------------------------------------------
+# 千鳥支線（本郷 - 千鳥、全線単線）
+# ---------------------------------------------------------------------------
+CHIDORI_BRANCH_STATIONS = [
+    {"name": "本郷", "facilities": "2面4線（千鳥支線へは1・4番線からのみ入線可能）", "notes": "井問線と接続。"},
+    {"name": "本郷神宮前", "facilities": "1面2線（すれ違い可能）", "notes": ""},
+    {"name": "千鳥山道", "facilities": "1面1線", "notes": ""},
+    {"name": "奥千鳥", "facilities": "1面2線（片方は千鳥方面からの折り返し用）", "notes": ""},
+    {"name": "南千鳥", "facilities": "2面2線（すれ違い可能）", "notes": "問屋町方面への連絡線あり。"},
+    {"name": "千鳥", "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）", "notes": "尾羽急本線・井問線と接続。"},
+]
+
+CHIDORI_BRANCH_RUN_TIMES_SEC = [
+    140,  # 本郷-本郷神宮前
+    110,  # 本郷神宮前-千鳥山道
+    115,  # 千鳥山道-奥千鳥
+    80,   # 奥千鳥-南千鳥
+    110,  # 南千鳥-千鳥
+]
+
+CHIDORI_BRANCH_NOTES = "全線単線。運行種別は普通（各駅停車）のみ。"
+
+# ---------------------------------------------------------------------------
+# 井問線（いといせん、井口 - 千鳥）
+# ---------------------------------------------------------------------------
+ITOI_LINE_SERVICE_TYPES = ["普通", "快速", "急行"]
+
+ITOI_LINE_STATIONS = [
+    {
+        "name": "井口",
+        "facilities": "尾羽急本線と同じ構造（本線の副本線から井問線へ、井問線から来ると副本線に出る）",
+        "stops": ITOI_LINE_SERVICE_TYPES,
+        "notes": "尾羽急本線と接続。",
+    },
+    {"name": "上井口", "facilities": "2面2線", "stops": ["普通"], "notes": ""},
+    {"name": "参田町", "facilities": "2面2線", "stops": ["普通", "快速"], "notes": ""},
+    {
+        "name": "東本郷",
+        "facilities": "2面2線",
+        "stops": ["普通"],
+        "notes": "普通のうち一部は通過（全便停車ではない）。",
+    },
+    {
+        "name": "本郷",
+        "facilities": "2面4線（副本線から千鳥支線へ入線可能）",
+        "stops": ITOI_LINE_SERVICE_TYPES,
+        "notes": "千鳥支線と接続。",
+    },
+    {
+        "name": "西問屋町",
+        "facilities": "1面2線",
+        "stops": ["普通"],
+        "notes": "普通のうち一部は通過（全便停車ではない）。",
+    },
+    {
+        "name": "問屋町",
+        "facilities": "2面4線（中2線は通過線）",
+        "stops": ["普通", "快速"],
+        "notes": "南千鳥方面（千鳥支線）への連絡線あり。",
+    },
+    {
+        "name": "千鳥",
+        "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）",
+        "stops": ITOI_LINE_SERVICE_TYPES,
+        "notes": "尾羽急本線・千鳥支線と接続。",
+    },
+]
+
+ITOI_LINE_RUN_TIMES_SEC = [
+    120,  # 井口-上井口
+    80,   # 上井口-参田町
+    80,   # 参田町-東本郷
+    60,   # 東本郷-本郷
+    80,   # 本郷-西問屋町
+    110,  # 西問屋町-問屋町
+    110,  # 問屋町-千鳥
+]
+
+# 急行は東本郷・西問屋町などを通過するため、区間ごとの直行所要時分が別途定義されている
+ITOI_LINE_EXPRESS_RUN_TIMES_SEC = {
+    ("井口", "本郷"): 210,
+    ("本郷", "千鳥"): 300,
+}
+
+ITOI_LINE_NOTES = (
+    "井問線は複線（千鳥〜問屋町間は複々線、問屋町〜井口間は複線）。"
+    "本郷から千鳥支線へ、千鳥から尾羽急本線へ直通運転が可能。"
+    "南千鳥〜問屋町間の連絡線の所要時分は「千鳥〜南千鳥」+「千鳥〜問屋町」-20秒で算出する"
+    "（この連絡線でつながっている）。"
+    "停車パターン: 普通は各駅停車（東本郷・西問屋町は一部列車のみ停車）、"
+    "快速は井口・参田町・本郷・問屋町・千鳥の順に停車、"
+    "急行は井口・本郷・千鳥の順に停車。"
+)
+
 
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
@@ -204,5 +298,47 @@ def build_line_context_text() -> str:
         a = STATIONS[i]["name"]
         b = STATIONS[i + 1]["name"]
         lines.append(f"- {a} - {b}: {RUN_TIMES_SEC[i]}秒")
+
+    # --- 千鳥支線 ---
+    lines.append("")
+    lines.append("# 千鳥支線 路線データ（本郷 - 千鳥）")
+    lines.append(CHIDORI_BRANCH_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（本郷から千鳥の順）")
+    for st in CHIDORI_BRANCH_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities']}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
+    lines.append("")
+    lines.append("## 駅間所要時分（秒）")
+    for i in range(len(CHIDORI_BRANCH_STATIONS) - 1):
+        a = CHIDORI_BRANCH_STATIONS[i]["name"]
+        b = CHIDORI_BRANCH_STATIONS[i + 1]["name"]
+        lines.append(f"- {a} - {b}: {CHIDORI_BRANCH_RUN_TIMES_SEC[i]}秒")
+
+    # --- 井問線 ---
+    lines.append("")
+    lines.append("# 井問線（いといせん）路線データ（井口 - 千鳥）")
+    lines.append(f"運行種別: {', '.join(ITOI_LINE_SERVICE_TYPES)}")
+    lines.append(ITOI_LINE_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（井口から千鳥の順）")
+    for st in ITOI_LINE_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities']} / "
+            f"停車種別={'・'.join(st['stops'])}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
+    lines.append("")
+    lines.append("## 駅間所要時分（秒）")
+    for i in range(len(ITOI_LINE_STATIONS) - 1):
+        a = ITOI_LINE_STATIONS[i]["name"]
+        b = ITOI_LINE_STATIONS[i + 1]["name"]
+        lines.append(f"- {a} - {b}: {ITOI_LINE_RUN_TIMES_SEC[i]}秒")
+    lines.append("")
+    lines.append("## 急行の区間直行所要時分（秒）")
+    for (a, b), sec in ITOI_LINE_EXPRESS_RUN_TIMES_SEC.items():
+        lines.append(f"- {a} - {b}: {sec}秒")
 
     return "\n".join(lines)
