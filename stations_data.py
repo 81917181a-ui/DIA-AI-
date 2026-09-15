@@ -278,6 +278,50 @@ ITOI_LINE_NOTES = (
     "急行は井口・本郷・千鳥の順に停車。"
 )
 
+# ---------------------------------------------------------------------------
+# 東阪モノレール（山樺町 - 今台空港、尾羽急本線・井問線とは接続しない独立路線）
+# ---------------------------------------------------------------------------
+TOZAKA_MONORAIL_SERVICE_TYPES = ["普通", "空港快速"]
+
+TOZAKA_MONORAIL_STATIONS = [
+    "山樺町",
+    "ジオスクエア",
+    "皿具養鶏場前",
+    "朱雀島",
+    "流通センター",
+    "みやこ橋",
+    "巴海岸公園",
+    "今台空港",
+]
+
+# 普通の駅間所要時分（秒）。上り・下りとも同じ（⇅で同一時分と指定されている）。
+TOZAKA_MONORAIL_RUN_TIMES_SEC = [
+    110,  # 山樺町-ジオスクエア
+    100,  # ジオスクエア-皿具養鶏場前
+    70,   # 皿具養鶏場前-朱雀島
+    60,   # 朱雀島-流通センター
+    80,   # 流通センター-みやこ橋
+    70,   # みやこ橋-巴海岸公園
+    120,  # 巴海岸公園-今台空港
+]
+
+# 空港快速の停車駅（山樺町・朱雀島・巴海岸公園・今台空港のみ。朱雀島は要望があれば停車、
+# 通常は通過）。ジオスクエア・皿具養鶏場前・流通センター・みやこ橋は通過。
+TOZAKA_MONORAIL_EXPRESS_STOPS = ["山樺町", "朱雀島", "巴海岸公園", "今台空港"]
+
+# 空港快速の停車駅間の直行所要時分（秒）。停車駅の並び順に対応する。
+TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC = [
+    120,  # 山樺町-朱雀島
+    135,  # 朱雀島-巴海岸公園
+    210,  # 巴海岸公園-今台空港
+]
+
+TOZAKA_MONORAIL_NOTES = (
+    "尾羽急本線・井問線とは接続しない独立した路線（モノレール）。"
+    "普通は全駅に停車。空港快速はジオスクエア・皿具養鶏場前・流通センター・"
+    "みやこ橋を通過し、朱雀島は要望があれば停車（通常は通過）。"
+)
+
 
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
@@ -340,5 +384,28 @@ def build_line_context_text() -> str:
     lines.append("## 急行の区間直行所要時分（秒）")
     for (a, b), sec in ITOI_LINE_EXPRESS_RUN_TIMES_SEC.items():
         lines.append(f"- {a} - {b}: {sec}秒")
+
+    # --- 東阪モノレール ---
+    lines.append("")
+    lines.append("# 東阪モノレール 路線データ（山樺町 - 今台空港）")
+    lines.append(f"運行種別: {', '.join(TOZAKA_MONORAIL_SERVICE_TYPES)}")
+    lines.append(TOZAKA_MONORAIL_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（山樺町から今台空港の順、普通は全駅停車）")
+    for name in TOZAKA_MONORAIL_STATIONS:
+        lines.append(f"- {name}")
+    lines.append("")
+    lines.append("## 普通の駅間所要時分（秒）")
+    for i in range(len(TOZAKA_MONORAIL_STATIONS) - 1):
+        a = TOZAKA_MONORAIL_STATIONS[i]
+        b = TOZAKA_MONORAIL_STATIONS[i + 1]
+        lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_RUN_TIMES_SEC[i]}秒")
+    lines.append("")
+    lines.append(f"## 空港快速の停車駅: {'・'.join(TOZAKA_MONORAIL_EXPRESS_STOPS)}")
+    lines.append("## 空港快速の停車駅間の直行所要時分（秒）")
+    for i in range(len(TOZAKA_MONORAIL_EXPRESS_STOPS) - 1):
+        a = TOZAKA_MONORAIL_EXPRESS_STOPS[i]
+        b = TOZAKA_MONORAIL_EXPRESS_STOPS[i + 1]
+        lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC[i]}秒")
 
     return "\n".join(lines)
