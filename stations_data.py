@@ -284,14 +284,21 @@ ITOI_LINE_NOTES = (
 TOZAKA_MONORAIL_SERVICE_TYPES = ["普通", "空港快速"]
 
 TOZAKA_MONORAIL_STATIONS = [
-    "山樺町",
-    "ジオスクエア",
-    "皿具養鶏場前",
-    "朱雀島",
-    "流通センター",
-    "みやこ橋",
-    "巴海岸公園",
-    "今台空港",
+    {"name": "山樺町", "facilities": "2面1線（浜松町駅のような構造）", "notes": ""},
+    {"name": "ジオスクエア", "facilities": "2面2線", "notes": ""},
+    {"name": "皿具養鶏場前", "facilities": "2面2線", "notes": ""},
+    {
+        "name": "朱雀島",
+        "facilities": "2面4線",
+        "notes": (
+            "山樺町側に朱雀車庫があり、山樺町からの電車が空港方面へ折り返し可能。"
+            "出庫にかかる時間は30秒。途中駅で待避が可能なのは朱雀島のみ。"
+        ),
+    },
+    {"name": "流通センター", "facilities": "2面2線", "notes": ""},
+    {"name": "みやこ橋", "facilities": "2面2線", "notes": ""},
+    {"name": "巴海岸公園", "facilities": "2面2線", "notes": ""},
+    {"name": "今台空港", "facilities": "1面2線", "notes": ""},
 ]
 
 # 普通の駅間所要時分（秒）。上り・下りとも同じ（⇅で同一時分と指定されている）。
@@ -392,13 +399,16 @@ def build_line_context_text() -> str:
     lines.append(TOZAKA_MONORAIL_NOTES)
     lines.append("")
     lines.append("## 駅一覧（山樺町から今台空港の順、普通は全駅停車）")
-    for name in TOZAKA_MONORAIL_STATIONS:
-        lines.append(f"- {name}")
+    for st in TOZAKA_MONORAIL_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities']}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
     lines.append("")
     lines.append("## 普通の駅間所要時分（秒）")
     for i in range(len(TOZAKA_MONORAIL_STATIONS) - 1):
-        a = TOZAKA_MONORAIL_STATIONS[i]
-        b = TOZAKA_MONORAIL_STATIONS[i + 1]
+        a = TOZAKA_MONORAIL_STATIONS[i]["name"]
+        b = TOZAKA_MONORAIL_STATIONS[i + 1]["name"]
         lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_RUN_TIMES_SEC[i]}秒")
     lines.append("")
     lines.append(f"## 空港快速の停車駅: {'・'.join(TOZAKA_MONORAIL_EXPRESS_STOPS)}")
