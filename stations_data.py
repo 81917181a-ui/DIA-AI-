@@ -329,6 +329,96 @@ TOZAKA_MONORAIL_NOTES = (
     "みやこ橋を通過し、朱雀島は要望があれば停車（通常は通過）。"
 )
 
+# ---------------------------------------------------------------------------
+# 尾羽急高速線（千鳥 - 金田）
+# ---------------------------------------------------------------------------
+RAPID_LINE_SERVICE_TYPES = ["各停", "急行", "快速急行"]
+
+RAPID_LINE_STATIONS = [
+    {
+        "name": "千鳥",
+        "facilities": "尾羽急本線・千鳥支線・井問線と共通（各路線データを参照）",
+        "stops": RAPID_LINE_SERVICE_TYPES,
+        "notes": "尾羽急本線・千鳥支線・井問線と接続。",
+    },
+    {"name": "問屋町", "facilities": "2面4線", "stops": ["各停"], "notes": "井問線の問屋町と同一駅。"},
+    {"name": "問屋蔵前", "facilities": "2面6線（中2線は通過線）", "stops": ["各停"], "notes": ""},
+    {"name": "赤堀大沢", "facilities": "2面4線（中2線は通過線）", "stops": ["各停"], "notes": ""},
+    {
+        "name": "赤堀",
+        "facilities": "2面4線",
+        "stops": ["各停", "急行"],
+        "notes": "赤堀アリーナ方面への支線があり、所要時分は70秒（詳細未設定）。",
+    },
+    {"name": "新赤堀", "facilities": "2面3線（中線あり）", "stops": ["各停"], "notes": ""},
+    {"name": "塚野", "facilities": "2面2線", "stops": ["各停"], "notes": "塚野側から金田線へ入線可能。"},
+    {
+        "name": "金田",
+        "facilities": "2面4線（真ん中は通過線）",
+        "stops": RAPID_LINE_SERVICE_TYPES,
+        "notes": "金田線と接続。",
+    },
+]
+
+# 各停の駅間所要時分（秒）
+RAPID_LINE_RUN_TIMES_SEC = [
+    115,  # 千鳥-問屋町
+    75,   # 問屋町-問屋蔵前
+    75,   # 問屋蔵前-赤堀大沢
+    90,   # 赤堀大沢-赤堀
+    120,  # 赤堀-新赤堀
+    60,   # 新赤堀-塚野
+    100,  # 塚野-金田
+]
+
+# 急行・快速急行は上記以外の駅を通過するため、区間ごとの直行所要時分を別途定義
+RAPID_LINE_EXPRESS_RUN_TIMES_SEC = {
+    ("快速急行", "千鳥", "金田"): 415,
+    ("急行", "千鳥", "赤堀"): 250,
+    ("急行", "赤堀", "金田"): 190,
+}
+
+RAPID_LINE_NOTES = (
+    "尾羽急高速線。千鳥方面で尾羽急本線・千鳥支線・井問線と、金田方面で金田線と接続。"
+    "各停は全駅に停車、急行は千鳥・赤堀・金田のみ、快速急行は千鳥・金田のみ停車。"
+    "塚野から金田線へ入線可能。"
+)
+
+# ---------------------------------------------------------------------------
+# 金田線（金田 - 金田新都心）
+# ---------------------------------------------------------------------------
+KANADA_LINE_SERVICE_TYPES = ["各停", "急行", "快速急行"]
+
+KANADA_LINE_STATIONS = [
+    {
+        "name": "金田",
+        "facilities": "地下駅",
+        "stops": KANADA_LINE_SERVICE_TYPES,
+        "notes": "駅番号OK01。尾羽急高速線と接続（塚野側から入線）。",
+    },
+    {"name": "鵲橋", "facilities": "", "stops": ["各停"], "notes": "駅番号OK01-1。"},
+    {"name": "金田市", "facilities": "", "stops": ["各停"], "notes": "駅番号OK02。"},
+    {"name": "金田空港", "facilities": "", "stops": ["各停", "急行"], "notes": "駅番号OK03。"},
+    {
+        "name": "金田新都心",
+        "facilities": "",
+        "stops": KANADA_LINE_SERVICE_TYPES,
+        "notes": "駅番号OK04。",
+    },
+]
+
+KANADA_LINE_RUN_TIMES_SEC = [
+    180,  # 金田-鵲橋
+    120,  # 鵲橋-金田市
+    90,   # 金田市-金田空港
+    90,   # 金田空港-金田新都心
+]
+
+KANADA_LINE_NOTES = (
+    "金田で尾羽急高速線と接続。各停は全駅に停車、"
+    "急行は金田・金田空港・金田新都心のみ、快速急行は金田・金田新都心のみ停車。"
+)
+
 
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
@@ -417,5 +507,49 @@ def build_line_context_text() -> str:
         a = TOZAKA_MONORAIL_EXPRESS_STOPS[i]
         b = TOZAKA_MONORAIL_EXPRESS_STOPS[i + 1]
         lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC[i]}秒")
+
+    # --- 尾羽急高速線 ---
+    lines.append("")
+    lines.append("# 尾羽急高速線 路線データ（千鳥 - 金田）")
+    lines.append(f"運行種別: {', '.join(RAPID_LINE_SERVICE_TYPES)}")
+    lines.append(RAPID_LINE_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（千鳥から金田の順）")
+    for st in RAPID_LINE_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities']} / "
+            f"停車種別={'・'.join(st['stops'])}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
+    lines.append("")
+    lines.append("## 各停の駅間所要時分（秒）")
+    for i in range(len(RAPID_LINE_STATIONS) - 1):
+        a = RAPID_LINE_STATIONS[i]["name"]
+        b = RAPID_LINE_STATIONS[i + 1]["name"]
+        lines.append(f"- {a} - {b}: {RAPID_LINE_RUN_TIMES_SEC[i]}秒")
+    lines.append("")
+    lines.append("## 急行・快速急行の区間直行所要時分（秒）")
+    for (service, a, b), sec in RAPID_LINE_EXPRESS_RUN_TIMES_SEC.items():
+        lines.append(f"- [{service}] {a} - {b}: {sec}秒")
+
+    # --- 金田線 ---
+    lines.append("")
+    lines.append("# 金田線 路線データ（金田 - 金田新都心）")
+    lines.append(f"運行種別: {', '.join(KANADA_LINE_SERVICE_TYPES)}")
+    lines.append(KANADA_LINE_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（金田から金田新都心の順）")
+    for st in KANADA_LINE_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities'] or '未設定'} / "
+            f"停車種別={'・'.join(st['stops'])}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
+    lines.append("")
+    lines.append("## 各停の駅間所要時分（秒）")
+    for i in range(len(KANADA_LINE_STATIONS) - 1):
+        a = KANADA_LINE_STATIONS[i]["name"]
+        b = KANADA_LINE_STATIONS[i + 1]["name"]
+        lines.append(f"- {a} - {b}: {KANADA_LINE_RUN_TIMES_SEC[i]}秒")
 
     return "\n".join(lines)
