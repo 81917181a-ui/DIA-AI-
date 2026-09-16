@@ -198,13 +198,9 @@ def rename_conversation(db, conversation_id: str, new_title: str):
 
 
 def is_oud2_export_request(user_input: str) -> bool:
-    """「oud2にして」「oudiaファイルとして出力して」のような指示かどうかを判定する。"""
+    """「oud2にして」「oudiaファイルお願い」のように、oud2/oudiaへの言及があれば反応する。"""
     lowered = user_input.lower()
-    has_target_word = ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
-    if not has_target_word:
-        return False
-    action_words = ("にして", "して", "出力", "作って", "変換", "エクスポート", "ください", "出して")
-    return any(w in user_input for w in action_words)
+    return ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
 
 
 def try_extract_rename_request(user_input: str):
@@ -376,11 +372,16 @@ def call_gemini_with_failover(history: list, user_message: str) -> str:
             model = _build_model(api_key)
             chat = model.start_chat(history=gemini_history)
 
+            # 1回あたり25秒でタイムアウトさせ、下書き＋自己チェックの2回合計でも
+            # 1分以内に収まるようにする（タイムアウトした場合は例外として扱われ、
+            # 次のAPIキーへのフェイルオーバー処理に入る）
+            request_options = {"timeout": 25}
+
             # 1回目：通常の回答（下書き）を生成
-            draft_response = chat.send_message(user_message)
+            draft_response = chat.send_message(user_message, request_options=request_options)
 
             # 2回目：同じチャット内で、下書きを自分自身でチェックさせて最終版を得る
-            review_response = chat.send_message(SELF_REVIEW_PROMPT)
+            review_response = chat.send_message(SELF_REVIEW_PROMPT, request_options=request_options)
             final_text = review_response.text
 
             with _gemini_key_lock:
