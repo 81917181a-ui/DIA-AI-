@@ -23,13 +23,19 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 from stations_data import build_line_context_text, SERVICE_TYPES, STATIONS
-from oud2_export import build_sample_oud2
+from oud2_export import build_sample_oud2, build_all_lines_zip
 
 
 @st.cache_data(show_spinner=False)
 def get_cached_sample_oud2() -> bytes:
     """終日ダイヤの.oud2生成は多少時間がかかるため、再実行のたびに作り直さないようキャッシュする。"""
     return build_sample_oud2()
+
+
+@st.cache_data(show_spinner=False)
+def get_cached_all_lines_zip() -> bytes:
+    """全路線ぶんの.oud2をまとめたzipもキャッシュする。"""
+    return build_all_lines_zip()
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -518,7 +524,15 @@ def main():
     for i, msg in enumerate(messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("oud2"):
+            if msg.get("oud2") == "all":
+                st.download_button(
+                    "📥 全路線の.oud2をzipでダウンロード",
+                    data=get_cached_all_lines_zip(),
+                    file_name="obakyu_all_lines.zip",
+                    mime="application/zip",
+                    key=f"oud2_dl_{current_id}_{i}",
+                )
+            elif msg.get("oud2"):
                 st.download_button(
                     "📥 .oud2ファイルをダウンロード",
                     data=get_cached_sample_oud2(),
@@ -545,16 +559,36 @@ def main():
         rename_target = try_extract_rename_request(user_input)
         confidential = is_confidential_request(user_input)
         oud2_request = is_oud2_export_request(user_input)
-        oud2_attached = False
+        oud2_all_lines = oud2_request and any(
+            w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")
+        )
+        oud2_attached = None  # None / "one" / "all"
 
         with st.chat_message("assistant"):
             if rename_target:
                 rename_conversation(db, current_id, rename_target)
                 reply = f"チャット名を「{rename_target}」に変更しました。"
                 st.markdown(reply)
+            elif oud2_all_lines:
+                reply = (
+                    "尾羽急本線・千鳥支線・井問線・東阪モノレール・尾羽急高速線・金田線、"
+                    "全6路線ぶんの終日ダイヤを.oud2形式で作成しました。"
+                    "下のボタンからzipでダウンロードして、OuDiaSecondで開いてください。"
+                )
+                st.markdown(reply)
+                st.download_button(
+                    "📥 全路線の.oud2をzipでダウンロード",
+                    data=get_cached_all_lines_zip(),
+                    file_name="obakyu_all_lines.zip",
+                    mime="application/zip",
+                    key=f"oud2_dl_new_{current_id}_{len(messages)}",
+                )
+                oud2_attached = "all"
             elif oud2_request:
                 reply = (
-                    "種別ごとの代表列車（下り・上り各1本）を含む.oud2ファイルを作成しました。"
+                    "尾羽急本線の終日ダイヤを.oud2ファイルとして作成しました。"
+                    "他の路線（千鳥支線・井問線・東阪モノレール・尾羽急高速線・金田線）も"
+                    "まとめて欲しい場合は「全路線をoud2にして」のように言ってください。"
                     "下のボタンからダウンロードして、OuDiaSecondで開いてください。"
                 )
                 st.markdown(reply)
@@ -566,7 +600,7 @@ def main():
                     mime="application/octet-stream",
                     key=f"oud2_dl_new_{current_id}_{len(messages)}",
                 )
-                oud2_attached = True
+                oud2_attached = "one"
             elif confidential:
                 reply = "申し訳ありませんが、その情報はお伝えできません。"
                 st.markdown(reply)
@@ -583,7 +617,7 @@ def main():
 
         assistant_message = {"role": "assistant", "content": reply}
         if oud2_attached:
-            assistant_message["oud2"] = True
+            assistant_message["oud2"] = oud2_attached
         messages.append(assistant_message)
         save_conversation_messages(db, current_id, messages)
 
