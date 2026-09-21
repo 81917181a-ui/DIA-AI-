@@ -419,6 +419,56 @@ KANADA_LINE_NOTES = (
     "急行は金田・金田空港・金田新都心のみ、快速急行は金田・金田新都心のみ停車。"
 )
 
+# ---------------------------------------------------------------------------
+# 餅壁BRT（BRT1〜BRT3、いずれも全停留所停車・双方向運行）
+# ---------------------------------------------------------------------------
+BRT_SERVICE_TYPES = ["BRT"]
+
+MOCHIKABE_BRT1_STATIONS = [
+    {"name": "本町営業所", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "本町", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "本社前", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "高阪", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT2・BRT3と接続。"},
+]
+MOCHIKABE_BRT1_RUN_TIMES_SEC = [30, 50, 45, 45]  # 本町営業所-本町-本社前-高阪-餅壁駅
+MOCHIKABE_BRT1_NOTES = "本町営業所 - 餅壁駅。全停留所に停車し、双方向とも同じ停留所に停車する。"
+
+MOCHIKABE_BRT2_STATIONS = [
+    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT1・BRT3と接続。"},
+    {"name": "舞院", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "高尾", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {
+        "name": "くるみや",
+        "facilities": "バス停留所",
+        "stops": BRT_SERVICE_TYPES,
+        "notes": "正式表記は「木」+「区」を組み合わせた字に「宮」を続けたものだが、"
+                 "該当する漢字が特定できないため読みのままひらがな表記にしている。",
+    },
+    {"name": "梅十字病院前", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "串橋", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+]
+MOCHIKABE_BRT2_RUN_TIMES_SEC = [80, 30, 50, 50, 70]  # 餅壁駅-舞院-高尾-くるみや-梅十字病院前-串橋
+MOCHIKABE_BRT2_NOTES = (
+    "餅壁駅 - 串橋。全停留所に停車し、双方向とも同じ停留所に停車する。"
+    "BRT2急行も存在するとのことだが、停車パターンが未提供のため今回は未反映。"
+)
+
+MOCHIKABE_BRT3_STATIONS = [
+    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT1・BRT2と接続。循環系統の起終点。"},
+    {"name": "アクロス", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "夏吉", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "東新地", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "望洲町", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "若潟駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "循環系統の起終点（1周して戻る）。"},
+]
+MOCHIKABE_BRT3_RUN_TIMES_SEC = [30, 30, 30, 30, 45, 45]  # 餅壁駅-アクロス-夏吉-東新地-望洲町-若潟駅-餅壁駅
+MOCHIKABE_BRT3_NOTES = (
+    "餅壁駅発着の循環（ループ）系統。餅壁駅→アクロス→夏吉→東新地→望洲町→若潟駅→餅壁駅の順に"
+    "一周する。逆回りの系統としても運行できる。"
+)
+
 
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
@@ -551,5 +601,29 @@ def build_line_context_text() -> str:
         a = KANADA_LINE_STATIONS[i]["name"]
         b = KANADA_LINE_STATIONS[i + 1]["name"]
         lines.append(f"- {a} - {b}: {KANADA_LINE_RUN_TIMES_SEC[i]}秒")
+
+    # --- 餅壁BRT ---
+    brt_routes = [
+        ("BRT1", MOCHIKABE_BRT1_STATIONS, MOCHIKABE_BRT1_RUN_TIMES_SEC, MOCHIKABE_BRT1_NOTES),
+        ("BRT2", MOCHIKABE_BRT2_STATIONS, MOCHIKABE_BRT2_RUN_TIMES_SEC, MOCHIKABE_BRT2_NOTES),
+        ("BRT3", MOCHIKABE_BRT3_STATIONS, MOCHIKABE_BRT3_RUN_TIMES_SEC, MOCHIKABE_BRT3_NOTES),
+    ]
+    lines.append("")
+    lines.append("# 餅壁BRT 路線データ（BRT1・BRT2・BRT3の3系統）")
+    lines.append("各系統とも運行種別はBRTのみで、全停留所に停車し、双方向（往復）とも運行する。")
+    for route_name, route_stations, route_times, route_notes in brt_routes:
+        lines.append("")
+        lines.append(f"## {route_name}（{route_stations[0]['name']} - {route_stations[-1]['name']}）")
+        lines.append(route_notes)
+        for st in route_stations:
+            lines.append(
+                f"- {st['name']}"
+                + (f"（備考: {st['notes']}）" if st["notes"] else "")
+            )
+        lines.append(f"### {route_name}の停留所間所要時分（秒）")
+        for i in range(len(route_stations) - 1):
+            a = route_stations[i]["name"]
+            b = route_stations[i + 1]["name"]
+            lines.append(f"- {a} - {b}: {route_times[i]}秒")
 
     return "\n".join(lines)
