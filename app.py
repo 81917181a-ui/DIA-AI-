@@ -62,7 +62,7 @@ MODEL_NAME = "gemini-3.6-flash"
 
 # Renderの自動スリープ防止用（10分ごとに自分自身へアクセスする）
 KEEP_ALIVE_INTERVAL_SECONDS = 10 * 60  # 10分
-KEEP_ALIVE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://dia-ai-y9bz.onrender.com")
+KEEP_ALIVE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://dia-ai-bde2.onrender.com")
 
 SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」です。鉄道のダイヤ（運行計画）・時刻表・
 運行パターンの作成や相談全般を専門とするAIとして振る舞ってください。
@@ -151,8 +151,19 @@ def ensure_session(db, session_id: str):
     return now, expires_at
 
 
+_cleanup_lock = threading.Lock()
+_last_cleanup_at = 0.0
+CLEANUP_INTERVAL_SEC = 30 * 60  # 30分に1回だけ実行し、毎回のページ表示を遅くしない
+
+
 def cleanup_expired(db):
     """作成から6時間を過ぎたセッションと、そのセッションに属するチャットを削除する。"""
+    global _last_cleanup_at
+    with _cleanup_lock:
+        if time.time() - _last_cleanup_at < CLEANUP_INTERVAL_SEC:
+            return
+        _last_cleanup_at = time.time()
+
     now_dt = datetime.now(timezone.utc)
     expired_docs = list(
         db.collection(SESSIONS_COLLECTION).where("expires_at", "<", now_dt).stream()
@@ -390,6 +401,7 @@ def call_gemini_with_failover(history: list, user_message: str) -> str:
     """
     GEMINI_API_KEY_1〜5を順番に試し、エラーが出たキーはスキップして
     次のキーに自動で切り替える。切り替え発生時・全滅時はDiscordへ通知する。
+    どれだけキーを切り替えても、全体で1分を超える前に諦めて案内を返す。
     """
     global _current_key_slot
 
@@ -405,18 +417,23 @@ def call_gemini_with_failover(history: list, user_message: str) -> str:
     with _gemini_key_lock:
         start_slot = _current_key_slot % len(keys)
 
+    # 1回あたりのタイムアウトは短めにし、全体でも45秒を超えたら
+    # それ以上キーを試さずに打ち切る（＝呼び出し元の応答が1分以内に収まるようにする）
+    PER_CALL_TIMEOUT_SEC = 12
+    OVERALL_DEADLINE_SEC = 45
+    request_options = {"timeout": PER_CALL_TIMEOUT_SEC}
+    overall_start = time.time()
+
     last_error = None
     for offset in range(len(keys)):
+        if time.time() - overall_start > OVERALL_DEADLINE_SEC:
+            break
+
         slot = (start_slot + offset) % len(keys)
         env_name, api_key = keys[slot]
         try:
             model = _build_model(api_key)
             chat = model.start_chat(history=gemini_history)
-
-            # 1回あたり25秒でタイムアウトさせ、下書き＋自己チェックの2回合計でも
-            # 1分以内に収まるようにする（タイムアウトした場合は例外として扱われ、
-            # 次のAPIキーへのフェイルオーバー処理に入る）
-            request_options = {"timeout": 25}
 
             # 1回目：通常の回答（下書き）を生成
             draft_response = chat.send_message(user_message, request_options=request_options)
@@ -437,13 +454,13 @@ def call_gemini_with_failover(history: list, user_message: str) -> str:
         except Exception as e:
             last_error = e
             notify_discord(
-                f"🔴 **{env_name}** でエラーが発生しました。次のAPIキーに切り替えます。\n"
-                f"エラー内容: {e}"
+                f"🔴 **{env_name}** でエラーが発生しました（{e}）。次のAPIキーに切り替えます。"
             )
             continue
 
-    notify_discord("🔴🔴 登録済みのGemini APIキーが全て利用できませんでした。")
-    return f"登録済みのAPIキーすべてでエラーが発生しました。最後のエラー: {last_error}"
+    notify_discord(f"🔴🔴 登録済みのGemini APIキーが全て利用できませんでした。最後のエラー: {last_error}")
+    # ユーザーには内部のエラー内容を出さず、一般的な案内だけを返す
+    return "AIは現在ご利用いただけません。時間を置くか、管理者にご報告ください。"
 
 
 # ---------------------------------------------------------------------------
