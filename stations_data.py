@@ -434,25 +434,35 @@ MOCHIKABE_BRT1_STATIONS = [
 MOCHIKABE_BRT1_RUN_TIMES_SEC = [30, 50, 45, 45]  # 本町営業所-本町-本社前-高阪-餅壁駅
 MOCHIKABE_BRT1_NOTES = "本町営業所 - 餅壁駅。全停留所に停車し、双方向とも同じ停留所に停車する。"
 
+BRT2_SERVICE_TYPES = ["BRT", "BRT2急行"]
+
 MOCHIKABE_BRT2_STATIONS = [
-    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT1・BRT3と接続。"},
-    {"name": "舞院", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "高尾", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": "BRT1・BRT3と接続。"},
+    {"name": "舞院", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": ""},
+    {"name": "高尾", "facilities": "バス停留所", "stops": ["BRT"], "notes": "BRT2急行は通過。"},
     {
         "name": "くるみや",
         "facilities": "バス停留所",
-        "stops": BRT_SERVICE_TYPES,
+        "stops": BRT2_SERVICE_TYPES,
         "notes": "正式表記は「木」+「区」を組み合わせた字に「宮」を続けたものだが、"
                  "該当する漢字が特定できないため読みのままひらがな表記にしている。",
     },
-    {"name": "梅十字病院前", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "串橋", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
+    {"name": "梅十字病院前", "facilities": "バス停留所", "stops": ["BRT"], "notes": "BRT2急行は通過。"},
+    {"name": "串橋", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": ""},
 ]
 MOCHIKABE_BRT2_RUN_TIMES_SEC = [80, 30, 50, 50, 70]  # 餅壁駅-舞院-高尾-くるみや-梅十字病院前-串橋
 MOCHIKABE_BRT2_NOTES = (
-    "餅壁駅 - 串橋。全停留所に停車し、双方向とも同じ停留所に停車する。"
-    "BRT2急行も存在するとのことだが、停車パターンが未提供のため今回は未反映。"
+    "餅壁駅 - 串橋。BRT（各停）は全停留所に停車し、双方向とも同じ停留所に停車する。"
+    "BRT2急行は餅壁駅・舞院・くるみや・串橋のみに停車し、高尾・梅十字病院前は通過する。"
+    "BRT2急行専用の走行レーン（急行線）があるため、各停との追い越しは問題にならない。"
 )
+# BRT2急行は高尾・梅十字病院前を通過するため、区間ごとの直行所要時分を別途定義
+MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC = {
+    ("BRT2急行", "餅壁駅", "舞院"): 60,
+    ("BRT2急行", "舞院", "くるみや"): 60,
+    ("BRT2急行", "くるみや", "串橋"): 85,
+}
+
 
 MOCHIKABE_BRT3_STATIONS = [
     {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT1・BRT2と接続。循環系統の起終点。"},
@@ -610,20 +620,28 @@ def build_line_context_text() -> str:
     ]
     lines.append("")
     lines.append("# 餅壁BRT 路線データ（BRT1・BRT2・BRT3の3系統）")
-    lines.append("各系統とも運行種別はBRTのみで、全停留所に停車し、双方向（往復）とも運行する。")
+    lines.append(
+        "各系統とも基本の運行種別はBRT（各停）で、全停留所に停車し、双方向（往復）とも運行する。"
+        "BRT2のみBRT2急行も運行しており、一部停留所を通過する。"
+    )
     for route_name, route_stations, route_times, route_notes in brt_routes:
         lines.append("")
         lines.append(f"## {route_name}（{route_stations[0]['name']} - {route_stations[-1]['name']}）")
         lines.append(route_notes)
         for st in route_stations:
             lines.append(
-                f"- {st['name']}"
-                + (f"（備考: {st['notes']}）" if st["notes"] else "")
+                f"- {st['name']}: 停車種別={'・'.join(st['stops'])}"
+                + (f" / 備考={st['notes']}" if st["notes"] else "")
             )
-        lines.append(f"### {route_name}の停留所間所要時分（秒）")
+        lines.append(f"### {route_name}の停留所間所要時分（秒、BRT＝各停）")
         for i in range(len(route_stations) - 1):
             a = route_stations[i]["name"]
             b = route_stations[i + 1]["name"]
             lines.append(f"- {a} - {b}: {route_times[i]}秒")
+
+    lines.append("")
+    lines.append("### BRT2急行の停車駅間の直行所要時分（秒）")
+    for (service, a, b), sec in MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC.items():
+        lines.append(f"- {a} - {b}: {sec}秒")
 
     return "\n".join(lines)
