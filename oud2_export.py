@@ -99,6 +99,12 @@ from stations_data import (
     MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC,
     MOCHIKABE_BRT3_STATIONS,
     MOCHIKABE_BRT3_RUN_TIMES_SEC,
+    AONAMI_BRT1_STATIONS,
+    AONAMI_BRT1_RUN_TIMES_SEC,
+    AONAMI_BRT1_2_STATIONS,
+    AONAMI_BRT1_2_RUN_TIMES_SEC,
+    AONAMI_BRT1_4_STATIONS,
+    AONAMI_BRT1_4_RUN_TIMES_SEC,
 )
 
 CRLF = "\r\n"
@@ -370,8 +376,13 @@ def build_full_day_trains(
     end_sec: int = OPERATION_END_SEC,
     dwell_sec: int = DEFAULT_DWELL_SEC,
     headways: dict = None,
+    one_way: bool = False,
 ):
-    """種別・方向ごとに、始発から終電まで運転間隔どおりに列車を並べた終日ダイヤを生成する。"""
+    """
+    種別・方向ごとに、始発から終電まで運転間隔どおりに列車を並べた終日ダイヤを生成する。
+    one_way=True の場合、逆方向（上り）の列車は作らない
+    （一方通行の循環系統など、折り返しが存在しない経路向け）。
+    """
     headways = headways or {}
     kudari_trains = []
     nobori_trains = []
@@ -391,6 +402,9 @@ def build_full_day_trains(
             )
             seq += 1
             t += headway
+
+        if one_way:
+            continue
 
         seq = 1
         t = start_sec
@@ -521,6 +535,36 @@ LINE_DEFS = [
         "run_times_sec": MOCHIKABE_BRT3_RUN_TIMES_SEC,
         "express_times": {},
     },
+    {
+        "key": "aonami_brt1",
+        "line_name": "あおなみBRT1",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": AONAMI_BRT1_STATIONS,
+        "service_types": ["BRT1"],
+        "run_times_sec": AONAMI_BRT1_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
+    {
+        "key": "aonami_brt1_2",
+        "line_name": "あおなみBRT1-2",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": AONAMI_BRT1_2_STATIONS,
+        "service_types": ["BRT1-2"],
+        "run_times_sec": AONAMI_BRT1_2_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
+    {
+        "key": "aonami_brt1_4",
+        "line_name": "あおなみBRT1-4",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": AONAMI_BRT1_4_STATIONS,
+        "service_types": ["BRT1-4"],
+        "run_times_sec": AONAMI_BRT1_4_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
 ]
 
 
@@ -531,6 +575,7 @@ def build_oud2_for_line(line_def: dict) -> bytes:
         run_times_sec=line_def["run_times_sec"],
         service_types=line_def["service_types"],
         express_times=line_def.get("express_times"),
+        one_way=line_def.get("one_way", False),
     )
     text = build_oud2_file(
         line_def["line_name"], line_def["dia_name"],
