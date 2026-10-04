@@ -480,6 +480,69 @@ MOCHIKABE_BRT3_NOTES = (
 )
 
 
+# ---------------------------------------------------------------------------
+# あおなみBRT（BRT1・BRT1-2・BRT1-4。いずれも一方通行の循環系統で、折り返しなし）
+# 路線名はユーザーからは明示されていないため、起点の「あおなみセンター」から仮に命名。
+# ---------------------------------------------------------------------------
+
+# --- BRT1: あおなみセンター発着の一方通行循環 ---
+# あおなみセンター-虹の原中央間は普段の往復と同じように運行されるが、
+# 虹の原中央-鶴巻団地-月見原-運動公園-春町公園-あけぼの-虹の原中央のループ部分は
+# 一方通行（逆回りはしない）。1周ぶんの経路として1本の片道列車で表現する。
+AONAMI_BRT1_STATIONS = [
+    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫（鶴巻団地）からの出庫先。"},
+    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの起点（出）。"},
+    {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫あり。"},
+    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
+    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
+    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
+    {"name": "あけぼの", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
+    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの終点（戻り）。"},
+    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
+]
+AONAMI_BRT1_RUN_TIMES_SEC = [45, 60, 45, 45, 45, 45, 60, 45]
+AONAMI_BRT1_NOTES = (
+    "あおなみセンター発着の一方通行循環系統（逆回りはしない）。"
+    "あおなみセンター〜虹の原中央間は通常どおり運行し、虹の原中央から先は"
+    "鶴巻団地→月見原→運動公園→春町公園→あけぼの→虹の原中央の順に1周してから"
+    "あおなみセンターへ戻る。車庫は鶴巻団地にあり、出庫時は"
+    "鶴巻団地→虹の原中央→あおなみセンターの順で運行する。"
+)
+
+# --- BRT1-2: あけぼの止まり（あけぼので運行終了、折り返しなし） ---
+AONAMI_BRT1_2_STATIONS = [
+    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "あけぼの", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": "終点。ここから先へは折り返さない。"},
+]
+AONAMI_BRT1_2_RUN_TIMES_SEC = [45, 60, 45, 45, 45, 45]
+AONAMI_BRT1_2_NOTES = "あおなみセンターからあけぼの止まりの系統。あけぼのから先の折り返しはできない。"
+
+# --- BRT1-4: 虹の原中央〜美南鳥羽（往路と復路で経由地が異なる一方通行の周回） ---
+AONAMI_BRT1_4_STATIONS = [
+    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "団地西", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "九十九町", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "美南鳥羽", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": "折り返し地点。"},
+    {"name": "九十九町", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
+]
+AONAMI_BRT1_4_RUN_TIMES_SEC = [40, 40, 30, 40, 40, 45, 45, 90, 45]
+AONAMI_BRT1_4_NOTES = (
+    "虹の原中央から団地西・月見原・九十九町を経て美南鳥羽へ向かい、"
+    "美南鳥羽からは運動公園・春町公園を経由する別経路で虹の原中央・あおなみセンターへ戻る、"
+    "往路と復路で経由地が異なる一方通行の系統。"
+)
+
+
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
     lines = ["# 尾羽急本線 路線データ", ""]
@@ -643,5 +706,32 @@ def build_line_context_text() -> str:
     lines.append("### BRT2急行の停車駅間の直行所要時分（秒）")
     for (service, a, b), sec in MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC.items():
         lines.append(f"- {a} - {b}: {sec}秒")
+
+    # --- あおなみBRT ---
+    aonami_routes = [
+        ("BRT1", AONAMI_BRT1_STATIONS, AONAMI_BRT1_RUN_TIMES_SEC, AONAMI_BRT1_NOTES),
+        ("BRT1-2", AONAMI_BRT1_2_STATIONS, AONAMI_BRT1_2_RUN_TIMES_SEC, AONAMI_BRT1_2_NOTES),
+        ("BRT1-4", AONAMI_BRT1_4_STATIONS, AONAMI_BRT1_4_RUN_TIMES_SEC, AONAMI_BRT1_4_NOTES),
+    ]
+    lines.append("")
+    lines.append("# あおなみBRT 路線データ（BRT1・BRT1-2・BRT1-4の3系統、路線名は仮称）")
+    lines.append(
+        "いずれも一方通行の循環・片道系統で、折り返し運転は行わない"
+        "（逆回りのダイヤは存在しない）。"
+    )
+    for route_name, route_stations, route_times, route_notes in aonami_routes:
+        lines.append("")
+        lines.append(f"## {route_name}（{route_stations[0]['name']}発 → {route_stations[-1]['name']}着）")
+        lines.append(route_notes)
+        for st in route_stations:
+            lines.append(
+                f"- {st['name']}"
+                + (f"（備考: {st['notes']}）" if st["notes"] else "")
+            )
+        lines.append(f"### {route_name}の停留所間所要時分（秒）")
+        for i in range(len(route_stations) - 1):
+            a = route_stations[i]["name"]
+            b = route_stations[i + 1]["name"]
+            lines.append(f"- {a} - {b}: {route_times[i]}秒")
 
     return "\n".join(lines)
