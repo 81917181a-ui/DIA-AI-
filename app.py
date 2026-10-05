@@ -462,20 +462,27 @@ def get_gemini_api_keys() -> list:
 
 def notify_discord(message: str):
     """DiscordのWebhookへ通知を送る（DISCORD_WEBHOOK_URL未設定なら何もしない）。"""
+    # Renderの「Logs」でも原因が見えるように、通知内容は必ずログにも出す
+    print(f"[notify] {message}", flush=True)
     if not DISCORD_WEBHOOK_URL:
+        print("[notify] DISCORD_WEBHOOK_URL が未設定のため、Discordには送っていません", flush=True)
         return
     try:
         payload = json.dumps({"content": message}).encode("utf-8")
         req = urllib.request.Request(
             DISCORD_WEBHOOK_URL,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # DiscordはUser-Agentが無いリクエストを403で弾くことがあるため付ける
+                "User-Agent": "obakyu-dia-ai/1.0",
+            },
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
-    except Exception:
-        # 通知自体の失敗でアプリを止めない
-        pass
+    except Exception as e:
+        # 通知自体の失敗でアプリは止めないが、原因はログに残す
+        print(f"[notify] Discordへの送信に失敗しました: {type(e).__name__}: {e}", flush=True)
 
 
 @lru_cache(maxsize=1)
@@ -548,6 +555,7 @@ def stream_gemini_with_failover(history: list, user_message: str):
 
         except Exception as e:
             last_error = e
+            print(f"[gemini] {env_name} でエラー: {type(e).__name__}: {e}", flush=True)
             if got_text:
                 # 途中まで出力済みなら、別キーでやり直さずここで打ち切る
                 notify_discord(f"🔴 **{env_name}** で応答の途中にエラーが発生しました（{e}）。")
