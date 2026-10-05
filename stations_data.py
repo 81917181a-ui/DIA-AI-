@@ -493,6 +493,7 @@ AONAMI_BRT1_STATIONS = [
     {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫（鶴巻団地）からの出庫先。"},
     {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの起点（出）。"},
     {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫あり。"},
+    {"name": "波平入口", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
     {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
     {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
     {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
@@ -500,11 +501,11 @@ AONAMI_BRT1_STATIONS = [
     {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの終点（戻り）。"},
     {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
 ]
-AONAMI_BRT1_RUN_TIMES_SEC = [45, 60, 45, 45, 45, 45, 60, 45]
+AONAMI_BRT1_RUN_TIMES_SEC = [45, 60, 40, 35, 45, 45, 45, 60, 45]
 AONAMI_BRT1_NOTES = (
     "あおなみセンター発着の一方通行循環系統（逆回りはしない）。"
     "あおなみセンター〜虹の原中央間は通常どおり運行し、虹の原中央から先は"
-    "鶴巻団地→月見原→運動公園→春町公園→あけぼの→虹の原中央の順に1周してから"
+    "鶴巻団地→波平入口→月見原→運動公園→春町公園→あけぼの→虹の原中央の順に1周してから"
     "あおなみセンターへ戻る。車庫は鶴巻団地にあり、出庫時は"
     "鶴巻団地→虹の原中央→あおなみセンターの順で運行する。"
 )
@@ -514,12 +515,13 @@ AONAMI_BRT1_2_STATIONS = [
     {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
+    {"name": "波平入口", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
     {"name": "あけぼの", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": "終点。ここから先へは折り返さない。"},
 ]
-AONAMI_BRT1_2_RUN_TIMES_SEC = [45, 60, 45, 45, 45, 45]
+AONAMI_BRT1_2_RUN_TIMES_SEC = [45, 60, 40, 35, 45, 45, 45]
 AONAMI_BRT1_2_NOTES = "あおなみセンターからあけぼの止まりの系統。あけぼのから先の折り返しはできない。"
 
 # --- BRT1-4: 虹の原中央〜美南鳥羽（往路と復路で経由地が異なる一方通行の周回） ---
