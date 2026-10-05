@@ -12,6 +12,7 @@ import re
 import json
 import uuid
 import time
+import queue
 import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -60,7 +61,8 @@ def get_cached_diagram_figure(line_key: str, hour_start: int, hour_end: int):
 # 定数
 # ---------------------------------------------------------------------------
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # 7日間
-MODEL_NAME = "gemini-3.6-flash"
+# Renderの環境変数 GEMINI_MODEL でモデルを差し替えられる（未設定なら下の既定値）
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
 # Renderの自動スリープ防止用（10分ごとに自分自身へアクセスする）
 KEEP_ALIVE_INTERVAL_SECONDS = 10 * 60  # 10分
@@ -440,11 +442,14 @@ def start_keep_alive_thread():
 GEMINI_KEY_ENV_VARS = [f"GEMINI_API_KEY_{i}" for i in range(1, 6)]  # GEMINI_API_KEY_1〜5
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# ストリーミングのタイムアウトは「返答の最後まで」にかかるため、短くしすぎると
-# 長い時刻表が途中で切れる。そのため1回あたりは余裕を持たせている。
-PER_CALL_TIMEOUT_SEC = 30
-# このくらい経過していたら、もう次のAPIキーは試さずに諦める
-FAILOVER_DEADLINE_SEC = 15
+# 最初の文字がこの秒数以内に来なければ、そのキーは諦めて次のキーに切り替える
+FIRST_TOKEN_TIMEOUT_SEC = int(os.environ.get("FIRST_TOKEN_TIMEOUT_SEC", "12"))
+# 返答の途中で、この秒数ずっと新しい文字が来なければ打ち切る
+STREAM_IDLE_TIMEOUT_SEC = 30
+# SDKに渡す1回のリクエスト全体の上限（長い時刻表が途中で切れないよう余裕を持たせる）
+STREAM_TOTAL_TIMEOUT_SEC = 120
+# 開始からこの秒数を過ぎていたら、もう次のAPIキーは試さずに諦める
+FAILOVER_DEADLINE_SEC = 30
 
 _gemini_key_lock = threading.Lock()
 _current_key_slot = 0  # 現在使用中のキーの並び順インデックス
@@ -496,6 +501,29 @@ def _build_model(api_key: str):
     return genai.GenerativeModel(MODEL_NAME, system_instruction=get_system_prompt())
 
 
+def _gemini_stream_worker(api_key: str, gemini_history: list, user_message: str, out_q):
+    """別スレッドでGeminiのストリームを受け取り、結果をキューに流す。"""
+    try:
+        model = _build_model(api_key)
+        chat = model.start_chat(history=gemini_history)
+        response = chat.send_message(
+            user_message,
+            stream=True,
+            request_options={"timeout": STREAM_TOTAL_TIMEOUT_SEC},
+        )
+        for chunk in response:
+            try:
+                text = chunk.text
+            except ValueError:
+                # 中身のないチャンク（終了通知など）は飛ばす
+                continue
+            if text:
+                out_q.put(("text", text))
+        out_q.put(("done", None))
+    except Exception as e:
+        out_q.put(("error", e))
+
+
 def stream_gemini_with_failover(history: list, user_message: str):
     """
     GEMINI_API_KEY_1〜5を順番に試し、エラーが出たキーはスキップして次のキーに
@@ -526,45 +554,54 @@ def stream_gemini_with_failover(history: list, user_message: str):
 
         slot = (start_slot + offset) % len(keys)
         env_name, api_key = keys[slot]
+
+        # 別スレッドでストリームを受け取り、「最初の文字が来るまで」の待ち時間を自分で管理する
+        # （SDKのタイムアウトは返答全体にかかるため、反応の遅さの判定には使えない）
+        out_q = queue.Queue()
+        threading.Thread(
+            target=_gemini_stream_worker,
+            args=(api_key, gemini_history, user_message, out_q),
+            daemon=True,
+        ).start()
+
         got_text = False
-        try:
-            model = _build_model(api_key)
-            chat = model.start_chat(history=gemini_history)
-            response = chat.send_message(
-                user_message,
-                stream=True,
-                request_options={"timeout": PER_CALL_TIMEOUT_SEC},
-            )
-            for chunk in response:
-                try:
-                    text = chunk.text
-                except ValueError:
-                    # 中身のないチャンク（終了通知など）は飛ばす
-                    continue
-                if text:
-                    got_text = True
-                    yield text
+        failed_error = None
+        while True:
+            wait = STREAM_IDLE_TIMEOUT_SEC if got_text else FIRST_TOKEN_TIMEOUT_SEC
+            try:
+                kind, value = out_q.get(timeout=wait)
+            except queue.Empty:
+                failed_error = TimeoutError(f"{wait}秒以内に応答がありませんでした")
+                break
 
-            with _gemini_key_lock:
-                if slot != _current_key_slot:
-                    _current_key_slot = slot
-                    notify_discord(
-                        f"⚠️ Gemini APIキーを切り替えました。現在使用中: **{env_name}**"
-                    )
-            return
-
-        except Exception as e:
-            last_error = e
-            print(f"[gemini] {env_name} でエラー: {type(e).__name__}: {e}", flush=True)
-            if got_text:
-                # 途中まで出力済みなら、別キーでやり直さずここで打ち切る
-                notify_discord(f"🔴 **{env_name}** で応答の途中にエラーが発生しました（{e}）。")
-                yield "\n\n（応答が途中で中断されました。もう一度お試しください）"
+            if kind == "text":
+                got_text = True
+                yield value
+            elif kind == "done":
+                with _gemini_key_lock:
+                    if slot != _current_key_slot:
+                        _current_key_slot = slot
+                        notify_discord(
+                            f"⚠️ Gemini APIキーを切り替えました。現在使用中: **{env_name}**"
+                        )
                 return
-            notify_discord(
-                f"🔴 **{env_name}** でエラーが発生しました（{e}）。次のAPIキーに切り替えます。"
-            )
-            continue
+            else:  # "error"
+                failed_error = value
+                break
+
+        last_error = failed_error
+        print(
+            f"[gemini] {env_name} でエラー: {type(failed_error).__name__}: {failed_error}",
+            flush=True,
+        )
+        if got_text:
+            # 途中まで出力済みなら、別キーでやり直さずここで打ち切る
+            notify_discord(f"🔴 **{env_name}** で応答の途中にエラーが発生しました（{failed_error}）。")
+            yield "\n\n（応答が途中で中断されました。もう一度お試しください）"
+            return
+        notify_discord(
+            f"🔴 **{env_name}** でエラーが発生しました（{failed_error}）。次のAPIキーに切り替えます。"
+        )
 
     notify_discord(f"🔴🔴 登録済みのGemini APIキーが全て利用できませんでした。最後のエラー: {last_error}")
     # ユーザーには内部のエラー内容を出さず、一般的な案内だけを返す
