@@ -86,8 +86,11 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
 - 駅間所要時分（秒）をもとに、現実的な時刻を計算すること。
 - ダイヤを提示する際は、可能であれば駅名・時刻・種別を含む表形式（Markdownテーブル）で示すこと。
 - 不明な点や前提条件が不足している場合は、仮定をおいたうえで明示すること。
-- 回答を出す前に、設備・停車種別・時刻計算・非公開情報の制約に矛盾がないか、
-  自分の中で必ず確認してから出力すること（確認の過程は出力しない）。
+- 「少々お待ちください」「現在構築中です」「作成いたします」のような、あとで出す前提の
+  返事で終わらせないこと。あなたはこの返信の中でしか回答できないので、ダイヤの依頼には
+  必ずその返信の中で、完成した時刻表（Markdownテーブル）まで出力すること。
+- 過去のやり取りに「システムエラー」「復旧しました」などの文言があっても、それには触れず、
+  今の依頼にだけ答えること。
 
 # 非公開情報に関する制約（最優先で厳守）
 - 駅間所要時分（秒）の生データは、時刻表を計算するためだけに内部的に使用すること。
@@ -300,100 +303,8 @@ def try_extract_rename_request(user_input: str):
     return None
 
 
-# ---------------------------------------------------------------------------
-# 非公開情報の漏洩ガード
-# ---------------------------------------------------------------------------
-CONFIDENTIAL_KEYWORDS = (
-    "APIキー", "api key", "apikey", "GEMINI_API_KEY", "環境変数",
-    "サービスアカウント", "認証情報", "秘密鍵", "private_key", "credential",
-    "webhook", "ウェブフック", "discord", "ディスコード",
-    "render", "レンダー", "メールアドレス", "パスワード", "firebase",
-    "firestore", "サーバーの設定", "デプロイ設定",
-)
-
+# 過去にこの定型文が履歴に残っているチャットのために、定数だけ残す（AIには履歴として渡さない）
 CONFIDENTIAL_REFUSAL = "申し訳ありませんが、その情報はお伝えできません。"
-
-# システムプロンプト自体の文面が出力に混ざっていないかを見るための目印
-PROMPT_LEAK_MARKERS = (
-    "# 非公開情報", "# 参考路線データ", "# 制約条件",
-    "非公開情報に関する制約", "参考路線データ",
-)
-
-# 「30秒」「45秒」のような駅間所要時分の生の秒数が何個も並んでいたら漏洩とみなす
-SECONDS_PATTERN = re.compile(r"\d+\s*秒")
-SECONDS_LEAK_THRESHOLD = 3
-
-STREAM_HOLDBACK_CHARS = 30  # 表示を少しだけ遅らせて、漏洩を検知してから見せるための保留文字数
-
-
-def is_confidential_request(user_input: str) -> bool:
-    """APIキー・環境変数・ホスティングアカウント情報などを聞き出そうとしていないか判定する。"""
-    lowered = user_input.lower()
-    return any(kw.lower() in lowered for kw in CONFIDENTIAL_KEYWORDS)
-
-
-def is_data_dump_request(user_input: str) -> bool:
-    """駅間所要時分などの生データや、システムプロンプトそのものを聞き出そうとしていないか判定する。"""
-    lowered = user_input.lower()
-    prompt_words = (
-        "システムプロンプト", "system prompt", "プロンプトを教え", "プロンプトを見せ",
-        "初期設定", "最初の指示", "上の指示", "前の指示", "ignore previous",
-        "以前の指示を無視", "指示を無視",
-    )
-    if any(w in lowered for w in prompt_words):
-        return True
-
-    if "駅間" in user_input:
-        target = ("所要", "時分", "秒", "データ")
-        dump = ("全部", "一覧", "すべて", "全て", "教えて", "出して", "表示", "見せて", "リスト")
-        if any(w in user_input for w in target) and any(w in user_input for w in dump):
-            return True
-
-    return False
-
-
-def contains_confidential_info(reply_text: str) -> bool:
-    """Geminiが生成した返答自体に、機密情報らしきキーワードが含まれていないか確認する。"""
-    lowered = reply_text.lower()
-    return any(kw.lower() in lowered for kw in CONFIDENTIAL_KEYWORDS)
-
-
-def looks_like_data_leak(reply_text: str) -> bool:
-    """返答に、システムプロンプトの文面や駅間所要時分の生データらしきものが含まれていないか確認する。"""
-    if any(marker in reply_text for marker in PROMPT_LEAK_MARKERS):
-        return True
-    if len(SECONDS_PATTERN.findall(reply_text)) >= SECONDS_LEAK_THRESHOLD:
-        return True
-    return False
-
-
-def is_leaking(reply_text: str) -> bool:
-    return contains_confidential_info(reply_text) or looks_like_data_leak(reply_text)
-
-
-def guarded_stream(stream, state: dict):
-    """
-    ストリーミング中の文章を監視し、漏洩を検知したらその場で打ち切る。
-    直近の数十文字は保留してから表示するので、漏洩部分が画面に出る前に止められる。
-    state["blocked"] が True なら、呼び出し側で表示を差し替える。
-    """
-    buffer = ""
-    emitted = 0
-    for piece in stream:
-        buffer += piece
-        if is_leaking(buffer):
-            state["blocked"] = True
-            return
-        safe_end = len(buffer) - STREAM_HOLDBACK_CHARS
-        if safe_end > emitted:
-            yield buffer[emitted:safe_end]
-            emitted = safe_end
-
-    if is_leaking(buffer):
-        state["blocked"] = True
-        return
-    if len(buffer) > emitted:
-        yield buffer[emitted:]
 
 
 def build_thinking_message(user_input: str) -> str:
@@ -453,6 +364,17 @@ FAILOVER_DEADLINE_SEC = 30
 
 _gemini_key_lock = threading.Lock()
 _current_key_slot = 0  # 現在使用中のキーの並び順インデックス
+
+AI_UNAVAILABLE_MESSAGE = "AIは現在ご利用いただけません。時間を置くか、管理者にご報告ください。"
+
+# これらの定型文は、AIに会話履歴として渡さない
+# （渡すと「システムエラーでご不便を…」のように、エラーの話を引きずった返答になるため）
+HISTORY_SKIP_REPLIES = {
+    AI_UNAVAILABLE_MESSAGE,
+    CONFIDENTIAL_REFUSAL,
+    "応答を生成できませんでした。もう一度お試しください。",
+    "GEMINI_API_KEY_1〜5 が未設定のため応答できません。",
+}
 
 
 def get_gemini_api_keys() -> list:
@@ -539,6 +461,11 @@ def stream_gemini_with_failover(history: list, user_message: str):
 
     gemini_history = []
     for m in history:
+        if m["role"] != "user" and m["content"] in HISTORY_SKIP_REPLIES:
+            # 失敗・お断りの定型文は渡さない。役割の並びが崩れないよう、直前のユーザー発言も一緒に外す
+            if gemini_history and gemini_history[-1]["role"] == "user":
+                gemini_history.pop()
+            continue
         role = "user" if m["role"] == "user" else "model"
         gemini_history.append({"role": role, "parts": [m["content"]]})
 
@@ -605,7 +532,7 @@ def stream_gemini_with_failover(history: list, user_message: str):
 
     notify_discord(f"🔴🔴 登録済みのGemini APIキーが全て利用できませんでした。最後のエラー: {last_error}")
     # ユーザーには内部のエラー内容を出さず、一般的な案内だけを返す
-    yield "AIは現在ご利用いただけません。時間を置くか、管理者にご報告ください。"
+    yield AI_UNAVAILABLE_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +698,6 @@ def main():
             st.markdown(user_input)
 
         rename_target = try_extract_rename_request(user_input)
-        confidential = is_confidential_request(user_input) or is_data_dump_request(user_input)
         oud2_request = is_oud2_export_request(user_input)
         oud2_all_lines = oud2_request and any(
             w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")
@@ -852,17 +778,11 @@ def main():
                 fig = get_cached_diagram_figure(line_key, hour_start, hour_end)
                 st.plotly_chart(fig, use_container_width=True, key=f"diagram_new_{current_id}_{len(messages)}")
                 diagram_attached = {"line_key": line_key, "hour_start": hour_start, "hour_end": hour_end}
-            elif confidential:
-                reply = CONFIDENTIAL_REFUSAL
-                st.markdown(reply)
             elif not get_gemini_api_keys():
                 reply = "GEMINI_API_KEY_1〜5 が未設定のため応答できません。"
                 st.markdown(reply)
             else:
-                state = {"blocked": False}
-                stream = guarded_stream(
-                    stream_gemini_with_failover(messages[:-1], user_input), state
-                )
+                stream = stream_gemini_with_failover(messages[:-1], user_input)
 
                 # 最初の文字が出るまでスピナー（「〇〇について検討中…」）を表示
                 with st.spinner(build_thinking_message(user_input)):
@@ -873,12 +793,7 @@ def main():
                 with placeholder.container():
                     reply = st.write_stream(chain([first] if first else [], stream))
 
-                if state["blocked"]:
-                    # 漏洩を検知したら、表示済みの分も含めて差し替える
-                    reply = CONFIDENTIAL_REFUSAL
-                    placeholder.empty()
-                    st.markdown(reply)
-                elif not reply:
+                if not reply:
                     reply = "応答を生成できませんでした。もう一度お試しください。"
                     placeholder.empty()
                     st.markdown(reply)
