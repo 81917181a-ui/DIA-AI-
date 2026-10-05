@@ -122,31 +122,31 @@ DEFAULT_TITLE = "新しいチャット"
 SESSIONS_COLLECTION = "obakyu_sessions"
 CONVERSATIONS_COLLECTION = "obakyu_conversations"
 
-_firebase_lock = threading.Lock()
-_firestore_client = None
-
-
+@st.cache_resource(show_spinner=False)
 def get_firestore_client():
     """
     環境変数 FIREBASE_CREDENTIALS_JSON（サービスアカウントJSONの中身を1行文字列にしたもの）
     からFirestoreクライアントを初期化して返す。未設定ならNoneを返す。
+
+    Streamlitは画面を更新するたびにこのファイルを最初から実行し直し、モジュール変数も
+    作り直される。そのため「作成済みか」の記憶には st.cache_resource を使う
+    （同時に複数の更新が走っても、初期化は1回だけになる）。
     """
-    global _firestore_client
-    with _firebase_lock:
-        if _firestore_client is not None:
-            return _firestore_client
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
+    if not cred_json:
+        return None
 
-        cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
-        if not cred_json:
-            return None
+    try:
+        app = firebase_admin.get_app()
+    except ValueError:
+        try:
+            cred = credentials.Certificate(json.loads(cred_json))
+            app = firebase_admin.initialize_app(cred)
+        except ValueError:
+            # 別の実行が先に初期化していた場合
+            app = firebase_admin.get_app()
 
-        if not firebase_admin._apps:
-            cred_dict = json.loads(cred_json)
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-
-        _firestore_client = firestore.client()
-        return _firestore_client
+    return firestore.client(app)
 
 
 def ensure_session(db, session_id: str):
@@ -166,18 +166,20 @@ def ensure_session(db, session_id: str):
     return now, expires_at
 
 
-_cleanup_lock = threading.Lock()
-_last_cleanup_at = 0.0
 CLEANUP_INTERVAL_SEC = 30 * 60  # 30分に1回だけ実行し、毎回のページ表示を遅くしない
 
 
-def cleanup_expired(db):
+@st.cache_resource(show_spinner=False)
+def get_cleanup_state():
+    return {"lock": threading.Lock(), "last": 0.0}
+
+
+def cleanup_expired(db, state):
     """期限を過ぎたセッションと、そのセッションに属するチャットを削除する。"""
-    global _last_cleanup_at
-    with _cleanup_lock:
-        if time.time() - _last_cleanup_at < CLEANUP_INTERVAL_SEC:
+    with state["lock"]:
+        if time.time() - state["last"] < CLEANUP_INTERVAL_SEC:
             return
-        _last_cleanup_at = time.time()
+        state["last"] = time.time()
 
     try:
         now_dt = datetime.now(timezone.utc)
@@ -192,14 +194,17 @@ def cleanup_expired(db):
             for c in convs:
                 c.reference.delete()
             doc.reference.delete()
-    except Exception:
+    except Exception as e:
         # 裏で動く掃除処理なので、失敗してもアプリは止めない
-        pass
+        print(f"[cleanup] 期限切れの削除に失敗しました: {type(e).__name__}: {e}", flush=True)
 
 
 def cleanup_expired_async(db):
     """期限切れ削除をバックグラウンドで実行し、ページ表示を待たせない。"""
-    threading.Thread(target=cleanup_expired, args=(db,), daemon=True).start()
+    state = get_cleanup_state()
+    if time.time() - state["last"] < CLEANUP_INTERVAL_SEC:
+        return
+    threading.Thread(target=cleanup_expired, args=(db, state), daemon=True).start()
 
 
 def load_conversations(db, session_id: str) -> list:
@@ -322,10 +327,6 @@ def build_thinking_message(user_input: str) -> str:
 # ---------------------------------------------------------------------------
 # スリープ防止（10分ごとに自分自身へアクセス）
 # ---------------------------------------------------------------------------
-_keep_alive_started = False
-_keep_alive_lock = threading.Lock()
-
-
 def _keep_alive_loop():
     while True:
         time.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
@@ -336,15 +337,11 @@ def _keep_alive_loop():
             pass
 
 
+@st.cache_resource(show_spinner=False)
 def start_keep_alive_thread():
     """アプリプロセスにつき1本だけ、自己アクセス用のバックグラウンドスレッドを起動する。"""
-    global _keep_alive_started
-    with _keep_alive_lock:
-        if _keep_alive_started:
-            return
-        thread = threading.Thread(target=_keep_alive_loop, daemon=True)
-        thread.start()
-        _keep_alive_started = True
+    threading.Thread(target=_keep_alive_loop, daemon=True).start()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +420,12 @@ def _build_model(api_key: str):
     return genai.GenerativeModel(MODEL_NAME, system_instruction=get_system_prompt())
 
 
+@st.cache_resource(show_spinner=False)
+def get_key_state():
+    """使用中のキーの記憶。更新のたびに1番目に戻らないよう、ここで保持する。"""
+    return {"lock": threading.Lock(), "slot": 0}
+
+
 def _gemini_stream_worker(api_key: str, gemini_history: list, user_message: str, out_q):
     """別スレッドでGeminiのストリームを受け取り、結果をキューに流す。"""
     try:
@@ -452,7 +455,7 @@ def stream_gemini_with_failover(history: list, user_message: str):
     自動で切り替える。返答は1回の生成でストリーミングし、できた分から順に返す。
     切り替え発生時・全滅時はDiscordへ通知する。
     """
-    global _current_key_slot
+    key_state = get_key_state()
 
     keys = get_gemini_api_keys()
     if not keys:
@@ -469,8 +472,8 @@ def stream_gemini_with_failover(history: list, user_message: str):
         role = "user" if m["role"] == "user" else "model"
         gemini_history.append({"role": role, "parts": [m["content"]]})
 
-    with _gemini_key_lock:
-        start_slot = _current_key_slot % len(keys)
+    with key_state["lock"]:
+        start_slot = key_state["slot"] % len(keys)
 
     overall_start = time.time()
     last_error = None
@@ -505,9 +508,9 @@ def stream_gemini_with_failover(history: list, user_message: str):
                 got_text = True
                 yield value
             elif kind == "done":
-                with _gemini_key_lock:
-                    if slot != _current_key_slot:
-                        _current_key_slot = slot
+                with key_state["lock"]:
+                    if slot != key_state["slot"]:
+                        key_state["slot"] = slot
                         notify_discord(
                             f"⚠️ Gemini APIキーを切り替えました。現在使用中: **{env_name}**"
                         )
