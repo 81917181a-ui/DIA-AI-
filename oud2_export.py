@@ -99,12 +99,12 @@ from stations_data import (
     MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC,
     MOCHIKABE_BRT3_STATIONS,
     MOCHIKABE_BRT3_RUN_TIMES_SEC,
-    AONAMI_BRT1_STATIONS,
-    AONAMI_BRT1_RUN_TIMES_SEC,
-    AONAMI_BRT1_2_STATIONS,
-    AONAMI_BRT1_2_RUN_TIMES_SEC,
-    AONAMI_BRT1_4_STATIONS,
-    AONAMI_BRT1_4_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_STATIONS,
+    NIJINOHARA_BRT1_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_2_STATIONS,
+    NIJINOHARA_BRT1_2_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_4_STATIONS,
+    NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
 )
 
 CRLF = "\r\n"
@@ -537,31 +537,31 @@ LINE_DEFS = [
     },
     {
         "key": "aonami_brt1",
-        "line_name": "あおなみBRT1",
+        "line_name": "虹の原BRT1",
         "dia_name": "AI生成 終日ダイヤ",
-        "stations": AONAMI_BRT1_STATIONS,
+        "stations": NIJINOHARA_BRT1_STATIONS,
         "service_types": ["BRT1"],
-        "run_times_sec": AONAMI_BRT1_RUN_TIMES_SEC,
+        "run_times_sec": NIJINOHARA_BRT1_RUN_TIMES_SEC,
         "express_times": {},
         "one_way": True,
     },
     {
         "key": "aonami_brt1_2",
-        "line_name": "あおなみBRT1-2",
+        "line_name": "虹の原BRT1-2",
         "dia_name": "AI生成 終日ダイヤ",
-        "stations": AONAMI_BRT1_2_STATIONS,
+        "stations": NIJINOHARA_BRT1_2_STATIONS,
         "service_types": ["BRT1-2"],
-        "run_times_sec": AONAMI_BRT1_2_RUN_TIMES_SEC,
+        "run_times_sec": NIJINOHARA_BRT1_2_RUN_TIMES_SEC,
         "express_times": {},
         "one_way": True,
     },
     {
         "key": "aonami_brt1_4",
-        "line_name": "あおなみBRT1-4",
+        "line_name": "虹の原BRT1-4",
         "dia_name": "AI生成 終日ダイヤ",
-        "stations": AONAMI_BRT1_4_STATIONS,
+        "stations": NIJINOHARA_BRT1_4_STATIONS,
         "service_types": ["BRT1-4"],
-        "run_times_sec": AONAMI_BRT1_4_RUN_TIMES_SEC,
+        "run_times_sec": NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
         "express_times": {},
         "one_way": True,
     },
@@ -599,3 +599,96 @@ def build_all_lines_zip() -> bytes:
             data = build_oud2_for_line(line_def)
             zf.writestr(f"{line_def['key']}.oud2", data)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# チャットでユーザーが実際に依頼したダイヤ（Gemini出力のDIA_JSON）から.oud2を組み立てる
+# ---------------------------------------------------------------------------
+def _match_station_indices(stations: list, train: dict, direction: str) -> list:
+    """
+    train["stops"]に並ぶ駅名を、stations上の物理インデックスへ順に対応付ける。
+    同じ駅名が複数回登場する路線（循環系統など）でも、進行方向に沿って
+    単調に増加（Kudari）・減少（Nobori）する形でインデックスを選ぶ。
+    """
+    name_to_indices = {}
+    for idx, st in enumerate(stations):
+        name_to_indices.setdefault(st["name"], []).append(idx)
+
+    matched = []
+    last_idx = None
+    for stop in train["stops"]:
+        name = stop.get("station", "")
+        candidates = name_to_indices.get(name)
+        if not candidates:
+            raise ValueError(f"駅「{name}」がこの路線のデータに見つかりません。")
+
+        if last_idx is None:
+            chosen = candidates[0] if direction == "Kudari" else candidates[-1]
+        elif direction == "Kudari":
+            later = [c for c in candidates if c > last_idx]
+            chosen = min(later) if later else min(candidates)
+        else:
+            earlier = [c for c in candidates if c < last_idx]
+            chosen = max(earlier) if earlier else max(candidates)
+
+        matched.append(chosen)
+        last_idx = chosen
+    return matched
+
+
+def _parse_time_to_sec(value):
+    """"H:MM" または "H:MM:SS" 形式の文字列を0時からの経過秒に変換する。Noneはそのまま返す。"""
+    if value is None:
+        return None
+    parts = str(value).strip().split(":")
+    if len(parts) == 2:
+        h, m, s = parts[0], parts[1], "0"
+    elif len(parts) == 3:
+        h, m, s = parts
+    else:
+        raise ValueError(f"時刻の形式が不正です: {value!r}")
+    return int(h) * 3600 + int(m) * 60 + int(s)
+
+
+def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
+    """
+    チャットでユーザーが実際に依頼して作られたダイヤ（Geminiが出力したDIA_JSON）から
+    .oud2ファイルを組み立てる。LINE_DEFSに定義済みの路線のみ対応。
+    """
+    line_key = custom_dia.get("line_key")
+    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
+    if line_def is None:
+        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+
+    stations = line_def["stations"]
+    service_types = line_def["service_types"]
+
+    kudari_trains = []
+    nobori_trains = []
+
+    for train in custom_dia.get("trains", []):
+        direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
+        service_name = train.get("service")
+        service_index = service_types.index(service_name) if service_name in service_types else 0
+
+        indices = _match_station_indices(stations, train, direction)
+        if not indices:
+            continue
+
+        stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
+        for pos, idx in enumerate(indices):
+            stop = train["stops"][pos]
+            stops[idx] = (_parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure")))
+
+        entry = {
+            "service_index": service_index,
+            "train_number": str(train.get("train_number") or ""),
+            "stops": stops,
+        }
+        (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
+
+    dia_name = custom_dia.get("dia_name") or "お願いしたダイヤ"
+    text = build_oud2_file(
+        line_def["line_name"], dia_name, stations, service_types, kudari_trains, nobori_trains
+    )
+    return text.encode("utf-8")
