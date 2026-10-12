@@ -26,14 +26,26 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 from stations_data import build_line_context_text, SERVICE_TYPES, STATIONS
-from oud2_export import build_sample_oud2, build_all_lines_zip, build_oud2_from_custom_dia
+from oud2_export import (
+    build_sample_oud2,
+    build_all_lines_zip,
+    build_oud2_from_custom_dia,
+    build_dense_oud2,
+)
 from diagram_export import (
     build_untenkeikaku_html,
     build_diagram_figure,
     parse_line_key,
     parse_hour_range,
     parse_train_number,
+    is_dense_schedule_request,
+    parse_headway_sec,
 )
+
+
+@st.cache_data(show_spinner=False)
+def get_cached_dense_oud2(line_key: str, headway_sec: int) -> bytes:
+    return build_dense_oud2(line_key=line_key, headway_sec=headway_sec)
 
 
 @st.cache_data(show_spinner=False)
@@ -54,8 +66,10 @@ def get_cached_untenkeikaku(line_key: str, train_number, direction: str):
 
 
 @st.cache_resource(show_spinner=False)
-def get_cached_diagram_figure(line_key: str, hour_start: int, hour_end: int):
-    return build_diagram_figure(line_key=line_key, hour_start=hour_start, hour_end=hour_end)
+def get_cached_diagram_figure(line_key: str, hour_start: int, hour_end: int, headway_sec: int = None):
+    return build_diagram_figure(
+        line_key=line_key, hour_start=hour_start, hour_end=hour_end, headway_sec=headway_sec,
+    )
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -773,8 +787,10 @@ def main():
         )
         untenkeikaku_request = is_untenkeikaku_request(user_input)
         diagram_request = is_diagram_request(user_input)
-        oud2_attached = None  # None / "one" / "all" / "custom"
+        dense_request = is_dense_schedule_request(user_input)
+        oud2_attached = None  # None / "one" / "all" / "custom" / "dense"
         custom_dia_for_oud2 = None
+        dense_oud2_info = None
         untenkeikaku_attached = None
         diagram_attached = None
         new_custom_dia = None
@@ -799,6 +815,43 @@ def main():
                     key=f"oud2_dl_new_{current_id}_{len(messages)}",
                 )
                 oud2_attached = "all"
+            elif dense_request:
+                line_key = parse_line_key(user_input)
+                headway_sec = parse_headway_sec(user_input)
+                headway_min = headway_sec // 60
+                if oud2_request:
+                    reply = (
+                        f"全種別の運転間隔を{headway_min}分に揃えた過密ダイヤを.oud2ファイルとして"
+                        "作成しました。下のボタンからダウンロードして、OuDiaSecondで開いてください。"
+                        "「5分間隔の過密ダイヤ」のように間隔を指定することもできます。"
+                    )
+                    st.markdown(reply)
+                    st.download_button(
+                        "📥 過密ダイヤを.oud2でダウンロード",
+                        data=get_cached_dense_oud2(line_key, headway_sec),
+                        file_name="dense_dia.oud2",
+                        mime="application/octet-stream",
+                        key=f"oud2_dense_dl_new_{current_id}_{len(messages)}",
+                    )
+                    oud2_attached = "dense"
+                    dense_oud2_info = {"line_key": line_key, "headway_sec": headway_sec}
+                else:
+                    hour_start, hour_end = parse_hour_range(user_input)
+                    reply = (
+                        f"全種別の運転間隔を{headway_min}分に揃えた過密ダイヤグラム"
+                        f"（{hour_start}:00〜{hour_end}:00、実線=下り・点線=上り）を作成しました。"
+                        "「5分間隔の過密ダイヤ」のように間隔を、"
+                        "「7時から10時の過密ダイヤ」のように時間帯を指定することもできます。"
+                    )
+                    st.markdown(reply)
+                    fig = get_cached_diagram_figure(line_key, hour_start, hour_end, headway_sec)
+                    st.plotly_chart(
+                        fig, use_container_width=True, key=f"diagram_dense_new_{current_id}_{len(messages)}"
+                    )
+                    diagram_attached = {
+                        "line_key": line_key, "hour_start": hour_start, "hour_end": hour_end,
+                        "headway_sec": headway_sec,
+                    }
             elif oud2_request and find_last_custom_dia(messages[:-1]):
                 custom_dia_for_oud2 = find_last_custom_dia(messages[:-1])
                 try:
@@ -904,6 +957,8 @@ def main():
             assistant_message["oud2"] = oud2_attached
             if oud2_attached == "custom" and custom_dia_for_oud2:
                 assistant_message["custom_dia"] = custom_dia_for_oud2
+            if oud2_attached == "dense" and dense_oud2_info:
+                assistant_message["dense_oud2"] = dense_oud2_info
         if untenkeikaku_attached:
             assistant_message["untenkeikaku"] = untenkeikaku_attached
         if diagram_attached:
