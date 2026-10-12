@@ -294,6 +294,10 @@ def rename_conversation(db, conversation_id: str, new_title: str):
     )
 
 
+def delete_conversation(db, conversation_id: str):
+    db.collection(CONVERSATIONS_COLLECTION).document(conversation_id).delete()
+
+
 def is_oud2_export_request(user_input: str) -> bool:
     """「oud2にして」「oudiaファイルお願い」のように、oud2/oudiaへの言及があれば反応する。"""
     lowered = user_input.lower()
@@ -657,15 +661,18 @@ def main():
     if "editing_conversation_id" not in st.session_state:
         st.session_state["editing_conversation_id"] = None
 
-    # --- サイドバー：チャット一覧（新規作成・切り替え・✏️で名前変更） ---
+    # --- サイドバー：チャット一覧（新規作成・切り替え・✏️で名前変更・🗑️で削除） ---
     if "menu_open_id" not in st.session_state:
         st.session_state["menu_open_id"] = None
+    if "deleting_conversation_id" not in st.session_state:
+        st.session_state["deleting_conversation_id"] = None
 
     with st.sidebar:
         if st.button("＋ 新しいチャット"):
             st.session_state["current_conversation_id"] = None
             st.session_state["editing_conversation_id"] = None
             st.session_state["menu_open_id"] = None
+            st.session_state["deleting_conversation_id"] = None
             st.rerun()
 
         st.divider()
@@ -691,6 +698,20 @@ def main():
                     if st.button("キャンセル", key=f"cancel_{conv_id}", use_container_width=True):
                         st.session_state["editing_conversation_id"] = None
                         st.rerun()
+            elif st.session_state["deleting_conversation_id"] == conv_id:
+                st.caption(f"「{conv['title']}」を削除しますか？元に戻せません。")
+                col_confirm, col_cancel = st.columns(2)
+                with col_confirm:
+                    if st.button("削除する", key=f"confirmdel_{conv_id}", use_container_width=True):
+                        delete_conversation(db, conv_id)
+                        if st.session_state["current_conversation_id"] == conv_id:
+                            st.session_state["current_conversation_id"] = None
+                        st.session_state["deleting_conversation_id"] = None
+                        st.rerun()
+                with col_cancel:
+                    if st.button("キャンセル", key=f"canceldel_{conv_id}", use_container_width=True):
+                        st.session_state["deleting_conversation_id"] = None
+                        st.rerun()
             else:
                 col_select, col_menu = st.columns([5, 1])
                 with col_select:
@@ -708,6 +729,10 @@ def main():
                 if st.session_state["menu_open_id"] == conv_id:
                     if st.button("名前を変更", key=f"renamemenu_{conv_id}", use_container_width=True):
                         st.session_state["editing_conversation_id"] = conv_id
+                        st.session_state["menu_open_id"] = None
+                        st.rerun()
+                    if st.button("削除", key=f"deletemenu_{conv_id}", use_container_width=True):
+                        st.session_state["deleting_conversation_id"] = conv_id
                         st.session_state["menu_open_id"] = None
                         st.rerun()
 
