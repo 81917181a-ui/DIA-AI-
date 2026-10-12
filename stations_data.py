@@ -1,738 +1,714 @@
 # -*- coding: utf-8 -*-
 """
-尾羽急本線 路線データ
-- 駅情報（設備・停車種別）
-- 駅間所要時分（秒）
-このファイルはAI（Gemini）にダイヤ作成の前提条件として渡すコンテキストとしても使用する。
+OuDiaSecond (.oud2) 形式でダイヤファイルを書き出す最小限のエクスポーター。
+
+.oud2はOuDiaSecondという鉄道ダイヤ作成ソフト独自のテキスト形式で、公式の仕様書は
+公開されていない。ユーザーから提供されたサンプルファイル（TK市ダイヤ.oud2 /
+運転会作成_分割併合_.oud2）を解析し、以下の構造を確認したうえで実装している。
+
+  FileType=OuDiaSecond.1.15
+  Rosen.
+    Rosenmei=<路線名>
+    Eki. (駅の数だけ繰り返し)
+      Ekimei=<駅名>
+      ...
+      EkiTrack2Cont.
+        EkiTrack2. (ホーム線路の数だけ繰り返し)
+          TrackName=<n番線>
+          TrackRyakusyou=<n>
+        .
+      .
+    .
+    Ressyasyubetsu. (列車種別の数だけ繰り返し)
+      Syubetsumei=<種別名>
+      ...
+    .
+    Dia.
+      DiaName=<ダイヤ名>
+      Kudari.
+        Ressya. (下り列車の数だけ繰り返し)
+          Houkou=Kudari
+          Syubetsu=<種別インデックス>
+          EkiJikoku=<駅ごとの時刻を,区切りで並べたもの>
+        .
+      .
+      Nobori.
+        Ressya. (上り列車の数だけ繰り返し)
+          ...
+        .
+      .
+    .
+  .
+  FileTypeAppComment=...
+
+EkiJikokuの1駅ぶんのエントリは以下のいずれか：
+  - 空文字列: その列車はこの駅を通らない（経路の始点より前・終点より後、
+    または該当種別がそもそもその駅に来ない「なし」扱い）
+  - "1;<時刻>$<番線インデックス>"          … 起点駅（発のみ、停車）
+  - "1;<時刻>/$<番線インデックス>"          … 終点駅（着のみ、停車）
+  - "1;<着時刻>/<発時刻>$<番線インデックス>" … 中間駅で停車
+  - "2$<番線インデックス>"                  … 通過（時刻は記録しない）
+
+停車は常に先頭"1"、通過は常に先頭"2"という固定の記号が使われる
+（方向や駅ごとに変わるものではないことを実データの解析で確認済み）。
+時刻はH[H]MM[SS]形式（秒が0の場合は秒部分を省略）。
+
+下り(Kudari)はEki.の宣言順（先頭の駅→末尾の駅）でエントリを並べ、
+上り(Nobori)は逆順（末尾の駅→先頭の駅）でエントリを並べる
+（実データを解析して確認した規則）。
+
+OuDiaSecondの1つのRosen（路線）は駅が一直線に並ぶ構造しか表現できず、
+分岐・合流のあるネットワーク全体を1ファイルに収めることはできない。
+そのため、路線ごとに別々の.oud2ファイルを生成し、まとめてzipで渡す方式にしている。
+
+列車の分割併合など、より高度な機能には対応していない。
 """
 
-# 運行種別（優等度が高い順ではなく、路線図の凡例順）
-SERVICE_TYPES = [
-    "各停",
-    "準急",
-    "快速",
-    "急行",
-    "快速急行",
-    "エアポート急行",
-    "区間急行",
-]
+import io
+import re
+import zipfile
 
-ALL_STOP = SERVICE_TYPES  # 「全種別停車」用のショートカット
-
-# 駅データ（路線順）
-# code: 駅ナンバリング（参考値）
-# name: 駅名
-# facilities: ホーム・線路の設備に関する情報
-# stops: 停車する種別のリスト
-# notes: 特記事項（折り返し可否、留置線、車庫、季節停車など）
-STATIONS = [
-    {
-        "code": "OB01",
-        "name": "尾羽原",
-        "facilities": "2面2線（中線は留置線）",
-        "stops": ALL_STOP,
-        "notes": "路線の起点かつ主要駅。この先（西側）へは進めない。",
-    },
-    {
-        "code": "OB02",
-        "name": "井口",
-        "facilities": "2面4線（両方面に待避線あり）",
-        "stops": [s for s in ALL_STOP if s not in ("快速急行", "エアポート急行")],
-        "notes": "快速急行・エアポート急行は通過。",
-    },
-    {
-        "code": "OB03",
-        "name": "梅郷",
-        "facilities": "2面2線",
-        "stops": ["各停"],
-        "notes": "",
-    },
-    {
-        "code": "OB04",
-        "name": "雲中",
-        "facilities": "1面2線（島式ホーム）",
-        "stops": ["各停", "準急", "快速"],
-        "notes": "",
-    },
-    {
-        "code": "OB05",
-        "name": "安越",
-        "facilities": "2面4線（両方面へ折り返し可能）",
-        "stops": [s for s in ALL_STOP if s != "快速急行"],
-        "notes": "快速急行のみ通過。",
-    },
-    {
-        "code": "OB05-1",
-        "name": "十川",
-        "facilities": "2面2線",
-        "stops": ["各停"],
-        "notes": "",
-    },
-    {
-        "code": "OB06",
-        "name": "千峰",
-        "facilities": "2面3線（尾羽原方面に退避線あり）",
-        "stops": ["各停", "準急"],
-        "notes": "希望がない限り折り返しは行わない。",
-    },
-    {
-        "code": "OB07",
-        "name": "南雲谷",
-        "facilities": "1面4線（中2線は停車専用）",
-        "stops": ["各停"],
-        "notes": "千峰との間に留置線あり（南雲谷から留置線まで30秒）。",
-    },
-    {
-        "code": "OB08",
-        "name": "雲谷",
-        "facilities": "2面3線（尾羽原方面に退避線あり）",
-        "stops": ["各停", "準急", "快速", "急行"],
-        "notes": "両方面へ折り返し可能。",
-    },
-    {
-        "code": "OB09",
-        "name": "長峰",
-        "facilities": "2面2線",
-        "stops": ["各停", "準急", "快速"],
-        "notes": "",
-    },
-    {
-        "code": "OB09-1",
-        "name": "西高徳",
-        "facilities": "2面2線",
-        "stops": ["各停", "快速"],
-        "notes": "",
-    },
-    {
-        "code": "OB10",
-        "name": "高徳",
-        "facilities": "2面4線（両方面へ折り返し可能）",
-        "stops": ALL_STOP,
-        "notes": "高徳〜明神前間に車庫あり。高徳発車後15秒で入庫可能。",
-    },
-    {
-        "code": "OB11",
-        "name": "明神前",
-        "facilities": "2面2線",
-        "stops": ["各停", "快速", "区間急行"],
-        "notes": "",
-    },
-    {
-        "code": "OB12",
-        "name": "舞子台",
-        "facilities": "2面2線",
-        "stops": ["準急", "快速"],
-        "notes": "夏季は急行が臨時停車（区間急行は通年停車）。",
-    },
-    {
-        "code": "OB13",
-        "name": "紀田",
-        "facilities": "6面10線（両方面へ折り返し可能）",
-        "stops": ALL_STOP,
-        "notes": "",
-    },
-    {
-        "code": "OB13-1",
-        "name": "穂",
-        "facilities": "2面2線",
-        "stops": ["各停", "快速", "区間急行"],
-        "notes": "瀬舞方面へ20秒で車両基地入庫可能だが、要望がない限り使用しない。",
-    },
-    {
-        "code": "OB14",
-        "name": "瀬舞",
-        "facilities": "2面2線",
-        "stops": ["各停", "快速", "区間急行"],
-        "notes": "",
-    },
-    {
-        "code": "OB15",
-        "name": "余美",
-        "facilities": "2面2線",
-        "stops": ["各停", "快速", "区間急行"],
-        "notes": "",
-    },
-    {
-        "code": "OB16",
-        "name": "千鳥",
-        "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）",
-        "stops": ALL_STOP,
-        "notes": "井問線と直通運転を行う。",
-    },
-]
-
-# 駅間所要時分（秒）。STATIONS の並び順に対応する隣接区間のリスト。
-# 例: RUN_TIMES[0] は STATIONS[0]（尾羽原）-> STATIONS[1]（井口）の所要時分
-RUN_TIMES_SEC = [
-    100,  # 尾羽原-井口
-    60,   # 井口-梅郷
-    40,   # 梅郷-雲中
-    70,   # 雲中-安越
-    90,   # 安越-十川
-    90,   # 十川-千峰
-    80,   # 千峰-南雲谷
-    120,  # 南雲谷-雲谷
-    90,   # 雲谷-長峰
-    90,   # 長峰-西高徳
-    90,   # 西高徳-高徳
-    130,  # 高徳-明神前
-    90,   # 明神前-舞子台
-    80,   # 舞子台-紀田
-    80,   # 紀田-穂
-    60,   # 穂-瀬舞
-    70,   # 瀬舞-余美
-    60,   # 余美-千鳥
-]
-
-# ---------------------------------------------------------------------------
-# 千鳥支線（本郷 - 千鳥、全線単線）
-# ---------------------------------------------------------------------------
-CHIDORI_BRANCH_STATIONS = [
-    {"name": "本郷", "facilities": "2面4線（千鳥支線へは1・4番線からのみ入線可能）", "notes": "井問線と接続。"},
-    {"name": "本郷神宮前", "facilities": "1面2線（すれ違い可能）", "notes": ""},
-    {"name": "千鳥山道", "facilities": "1面1線", "notes": ""},
-    {"name": "奥千鳥", "facilities": "1面2線（片方は千鳥方面からの折り返し用）", "notes": ""},
-    {"name": "南千鳥", "facilities": "2面2線（すれ違い可能）", "notes": "問屋町方面への連絡線あり。"},
-    {"name": "千鳥", "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）", "notes": "尾羽急本線・井問線と接続。"},
-]
-
-CHIDORI_BRANCH_RUN_TIMES_SEC = [
-    140,  # 本郷-本郷神宮前
-    110,  # 本郷神宮前-千鳥山道
-    115,  # 千鳥山道-奥千鳥
-    80,   # 奥千鳥-南千鳥
-    110,  # 南千鳥-千鳥
-]
-
-CHIDORI_BRANCH_NOTES = "全線単線。運行種別は普通（各駅停車）のみ。"
-
-# ---------------------------------------------------------------------------
-# 井問線（いといせん、井口 - 千鳥）
-# ---------------------------------------------------------------------------
-ITOI_LINE_SERVICE_TYPES = ["普通", "快速", "急行"]
-
-ITOI_LINE_STATIONS = [
-    {
-        "name": "井口",
-        "facilities": "尾羽急本線と同じ構造（本線の副本線から井問線へ、井問線から来ると副本線に出る）",
-        "stops": ITOI_LINE_SERVICE_TYPES,
-        "notes": "尾羽急本線と接続。",
-    },
-    {"name": "上井口", "facilities": "2面2線", "stops": ["普通"], "notes": ""},
-    {"name": "参田町", "facilities": "2面2線", "stops": ["普通", "快速"], "notes": ""},
-    {
-        "name": "東本郷",
-        "facilities": "2面2線",
-        "stops": ["普通"],
-        "notes": "普通のうち一部は通過（全便停車ではない）。",
-    },
-    {
-        "name": "本郷",
-        "facilities": "2面4線（副本線から千鳥支線へ入線可能）",
-        "stops": ITOI_LINE_SERVICE_TYPES,
-        "notes": "千鳥支線と接続。",
-    },
-    {
-        "name": "西問屋町",
-        "facilities": "1面2線",
-        "stops": ["普通"],
-        "notes": "普通のうち一部は通過（全便停車ではない）。",
-    },
-    {
-        "name": "問屋町",
-        "facilities": "2面4線（中2線は通過線）",
-        "stops": ["普通", "快速"],
-        "notes": "南千鳥方面（千鳥支線）への連絡線あり。",
-    },
-    {
-        "name": "千鳥",
-        "facilities": "2面4線（0番線は尾羽原方面へは行けない、4番線は尾羽原方面からの折り返し用）",
-        "stops": ITOI_LINE_SERVICE_TYPES,
-        "notes": "尾羽急本線・千鳥支線と接続。",
-    },
-]
-
-ITOI_LINE_RUN_TIMES_SEC = [
-    120,  # 井口-上井口
-    80,   # 上井口-参田町
-    80,   # 参田町-東本郷
-    60,   # 東本郷-本郷
-    80,   # 本郷-西問屋町
-    110,  # 西問屋町-問屋町
-    110,  # 問屋町-千鳥
-]
-
-# 急行は東本郷・西問屋町などを通過するため、区間ごとの直行所要時分が別途定義されている
-ITOI_LINE_EXPRESS_RUN_TIMES_SEC = {
-    ("井口", "本郷"): 210,
-    ("本郷", "千鳥"): 300,
-}
-
-ITOI_LINE_NOTES = (
-    "井問線は複線（千鳥〜問屋町間は複々線、問屋町〜井口間は複線）。"
-    "本郷から千鳥支線へ、千鳥から尾羽急本線へ直通運転が可能。"
-    "南千鳥〜問屋町間の連絡線の所要時分は「千鳥〜南千鳥」+「千鳥〜問屋町」-20秒で算出する"
-    "（この連絡線でつながっている）。"
-    "停車パターン: 普通は各駅停車（東本郷・西問屋町は一部列車のみ停車）、"
-    "快速は井口・参田町・本郷・問屋町・千鳥の順に停車、"
-    "急行は井口・本郷・千鳥の順に停車。"
+from stations_data import (
+    STATIONS,
+    RUN_TIMES_SEC,
+    SERVICE_TYPES,
+    CHIDORI_BRANCH_STATIONS,
+    CHIDORI_BRANCH_RUN_TIMES_SEC,
+    ITOI_LINE_STATIONS,
+    ITOI_LINE_RUN_TIMES_SEC,
+    ITOI_LINE_SERVICE_TYPES,
+    ITOI_LINE_EXPRESS_RUN_TIMES_SEC,
+    TOZAKA_MONORAIL_STATIONS,
+    TOZAKA_MONORAIL_RUN_TIMES_SEC,
+    TOZAKA_MONORAIL_SERVICE_TYPES,
+    TOZAKA_MONORAIL_EXPRESS_STOPS,
+    TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC,
+    RAPID_LINE_STATIONS,
+    RAPID_LINE_RUN_TIMES_SEC,
+    RAPID_LINE_SERVICE_TYPES,
+    RAPID_LINE_EXPRESS_RUN_TIMES_SEC,
+    KANADA_LINE_STATIONS,
+    KANADA_LINE_RUN_TIMES_SEC,
+    KANADA_LINE_SERVICE_TYPES,
+    BRT_SERVICE_TYPES,
+    BRT2_SERVICE_TYPES,
+    MOCHIKABE_BRT1_STATIONS,
+    MOCHIKABE_BRT1_RUN_TIMES_SEC,
+    MOCHIKABE_BRT2_STATIONS,
+    MOCHIKABE_BRT2_RUN_TIMES_SEC,
+    MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC,
+    MOCHIKABE_BRT3_STATIONS,
+    MOCHIKABE_BRT3_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_STATIONS,
+    NIJINOHARA_BRT1_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_2_STATIONS,
+    NIJINOHARA_BRT1_2_RUN_TIMES_SEC,
+    NIJINOHARA_BRT1_4_STATIONS,
+    NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
 )
 
-# ---------------------------------------------------------------------------
-# 東阪モノレール（山樺町 - 今台空港、尾羽急本線・井問線とは接続しない独立路線）
-# ---------------------------------------------------------------------------
-TOZAKA_MONORAIL_SERVICE_TYPES = ["普通", "空港快速"]
+CRLF = "\r\n"
 
-TOZAKA_MONORAIL_STATIONS = [
-    {"name": "山樺町", "facilities": "2面1線（浜松町駅のような構造）", "notes": ""},
-    {"name": "ジオスクエア", "facilities": "2面2線", "notes": ""},
-    {"name": "皿具養鶏場前", "facilities": "2面2線", "notes": ""},
-    {
-        "name": "朱雀島",
-        "facilities": "2面4線",
-        "notes": (
-            "山樺町側に朱雀車庫があり、山樺町からの電車が空港方面へ折り返し可能。"
-            "出庫にかかる時間は30秒。途中駅で待避が可能なのは朱雀島のみ。"
-        ),
-    },
-    {"name": "流通センター", "facilities": "2面2線", "notes": ""},
-    {"name": "みやこ橋", "facilities": "2面2線", "notes": ""},
-    {"name": "巴海岸公園", "facilities": "2面2線", "notes": ""},
-    {"name": "今台空港", "facilities": "1面2線", "notes": ""},
+# 代表ダイヤ生成のデフォルト値
+DEFAULT_START_SEC = 6 * 3600  # 6:00:00始発
+DEFAULT_DWELL_SEC = 20        # 中間停車駅での停車時間（秒）
+
+_SERVICE_COLORS = [
+    "00000000", "000000FF", "0000FF00", "00FF0000",
+    "00FF8000", "00808080", "00800080",
 ]
 
-# 普通の駅間所要時分（秒）。上り・下りとも同じ（⇅で同一時分と指定されている）。
-TOZAKA_MONORAIL_RUN_TIMES_SEC = [
-    110,  # 山樺町-ジオスクエア
-    100,  # ジオスクエア-皿具養鶏場前
-    70,   # 皿具養鶏場前-朱雀島
-    60,   # 朱雀島-流通センター
-    80,   # 流通センター-みやこ橋
-    70,   # みやこ橋-巴海岸公園
-    120,  # 巴海岸公園-今台空港
-]
 
-# 空港快速の停車駅（山樺町・朱雀島・巴海岸公園・今台空港のみ。朱雀島は要望があれば停車、
-# 通常は通過）。ジオスクエア・皿具養鶏場前・流通センター・みやこ橋は通過。
-TOZAKA_MONORAIL_EXPRESS_STOPS = ["山樺町", "朱雀島", "巴海岸公園", "今台空港"]
-
-# 空港快速の停車駅間の直行所要時分（秒）。停車駅の並び順に対応する。
-TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC = [
-    120,  # 山樺町-朱雀島
-    135,  # 朱雀島-巴海岸公園
-    210,  # 巴海岸公園-今台空港
-]
-
-TOZAKA_MONORAIL_NOTES = (
-    "尾羽急本線・井問線とは接続しない独立した路線（モノレール）。"
-    "普通は全駅に停車。空港快速はジオスクエア・皿具養鶏場前・流通センター・"
-    "みやこ橋を通過し、朱雀島は要望があれば停車（通常は通過）。"
-)
-
-# ---------------------------------------------------------------------------
-# 尾羽急高速線（千鳥 - 金田）
-# ---------------------------------------------------------------------------
-RAPID_LINE_SERVICE_TYPES = ["各停", "急行", "快速急行"]
-
-RAPID_LINE_STATIONS = [
-    {
-        "name": "千鳥",
-        "facilities": "尾羽急本線・千鳥支線・井問線と共通（各路線データを参照）",
-        "stops": RAPID_LINE_SERVICE_TYPES,
-        "notes": "尾羽急本線・千鳥支線・井問線と接続。",
-    },
-    {"name": "問屋町", "facilities": "2面4線", "stops": ["各停"], "notes": "井問線の問屋町と同一駅。"},
-    {"name": "問屋蔵前", "facilities": "2面6線（中2線は通過線）", "stops": ["各停"], "notes": ""},
-    {"name": "赤堀大沢", "facilities": "2面4線（中2線は通過線）", "stops": ["各停"], "notes": ""},
-    {
-        "name": "赤堀",
-        "facilities": "2面4線",
-        "stops": ["各停", "急行"],
-        "notes": "赤堀アリーナ方面への支線があり、所要時分は70秒（詳細未設定）。",
-    },
-    {"name": "新赤堀", "facilities": "2面3線（中線あり）", "stops": ["各停"], "notes": ""},
-    {"name": "塚野", "facilities": "2面2線", "stops": ["各停"], "notes": "塚野側から金田線へ入線可能。"},
-    {
-        "name": "金田",
-        "facilities": "2面4線（真ん中は通過線）",
-        "stops": RAPID_LINE_SERVICE_TYPES,
-        "notes": "金田線と接続。",
-    },
-]
-
-# 各停の駅間所要時分（秒）
-RAPID_LINE_RUN_TIMES_SEC = [
-    115,  # 千鳥-問屋町
-    75,   # 問屋町-問屋蔵前
-    75,   # 問屋蔵前-赤堀大沢
-    90,   # 赤堀大沢-赤堀
-    120,  # 赤堀-新赤堀
-    60,   # 新赤堀-塚野
-    100,  # 塚野-金田
-]
-
-# 急行・快速急行は上記以外の駅を通過するため、区間ごとの直行所要時分を別途定義
-RAPID_LINE_EXPRESS_RUN_TIMES_SEC = {
-    ("快速急行", "千鳥", "金田"): 415,
-    ("急行", "千鳥", "赤堀"): 250,
-    ("急行", "赤堀", "金田"): 190,
-}
-
-RAPID_LINE_NOTES = (
-    "尾羽急高速線。千鳥方面で尾羽急本線・千鳥支線・井問線と、金田方面で金田線と接続。"
-    "各停は全駅に停車、急行は千鳥・赤堀・金田のみ、快速急行は千鳥・金田のみ停車。"
-    "塚野から金田線へ入線可能。"
-)
-
-# ---------------------------------------------------------------------------
-# 金田線（金田 - 金田新都心）
-# ---------------------------------------------------------------------------
-KANADA_LINE_SERVICE_TYPES = ["各停", "急行", "快速急行"]
-
-KANADA_LINE_STATIONS = [
-    {
-        "name": "金田",
-        "facilities": "地下駅",
-        "stops": KANADA_LINE_SERVICE_TYPES,
-        "notes": "駅番号OK01。尾羽急高速線と接続（塚野側から入線）。",
-    },
-    {"name": "鵲橋", "facilities": "", "stops": ["各停"], "notes": "駅番号OK01-1。"},
-    {"name": "金田市", "facilities": "", "stops": ["各停"], "notes": "駅番号OK02。"},
-    {"name": "金田空港", "facilities": "", "stops": ["各停", "急行"], "notes": "駅番号OK03。"},
-    {
-        "name": "金田新都心",
-        "facilities": "",
-        "stops": KANADA_LINE_SERVICE_TYPES,
-        "notes": "駅番号OK04。",
-    },
-]
-
-KANADA_LINE_RUN_TIMES_SEC = [
-    180,  # 金田-鵲橋
-    120,  # 鵲橋-金田市
-    90,   # 金田市-金田空港
-    90,   # 金田空港-金田新都心
-]
-
-KANADA_LINE_NOTES = (
-    "金田で尾羽急高速線と接続。各停は全駅に停車、"
-    "急行は金田・金田空港・金田新都心のみ、快速急行は金田・金田新都心のみ停車。"
-)
-
-# ---------------------------------------------------------------------------
-# 餅壁BRT（BRT1〜BRT3、いずれも全停留所停車・双方向運行）
-# ---------------------------------------------------------------------------
-BRT_SERVICE_TYPES = ["BRT"]
-
-MOCHIKABE_BRT1_STATIONS = [
-    {"name": "本町営業所", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "本町", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "本社前", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "高阪", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT2・BRT3と接続。"},
-]
-MOCHIKABE_BRT1_RUN_TIMES_SEC = [30, 50, 45, 45]  # 本町営業所-本町-本社前-高阪-餅壁駅
-MOCHIKABE_BRT1_NOTES = "本町営業所 - 餅壁駅。全停留所に停車し、双方向とも同じ停留所に停車する。"
-
-BRT2_SERVICE_TYPES = ["BRT", "BRT2急行"]
-
-MOCHIKABE_BRT2_STATIONS = [
-    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": "BRT1・BRT3と接続。"},
-    {"name": "舞院", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": ""},
-    {"name": "高尾", "facilities": "バス停留所", "stops": ["BRT"], "notes": "BRT2急行は通過。"},
-    {
-        "name": "くるみや",
-        "facilities": "バス停留所",
-        "stops": BRT2_SERVICE_TYPES,
-        "notes": "正式表記は「木」+「区」を組み合わせた字に「宮」を続けたものだが、"
-                 "該当する漢字が特定できないため読みのままひらがな表記にしている。",
-    },
-    {"name": "梅十字病院前", "facilities": "バス停留所", "stops": ["BRT"], "notes": "BRT2急行は通過。"},
-    {"name": "串橋", "facilities": "バス停留所", "stops": BRT2_SERVICE_TYPES, "notes": ""},
-]
-MOCHIKABE_BRT2_RUN_TIMES_SEC = [80, 30, 50, 50, 70]  # 餅壁駅-舞院-高尾-くるみや-梅十字病院前-串橋
-MOCHIKABE_BRT2_NOTES = (
-    "餅壁駅 - 串橋。BRT（各停）は全停留所に停車し、双方向とも同じ停留所に停車する。"
-    "BRT2急行は餅壁駅・舞院・くるみや・串橋のみに停車し、高尾・梅十字病院前は通過する。"
-    "BRT2急行専用の走行レーン（急行線）があるため、各停との追い越しは問題にならない。"
-)
-# BRT2急行は高尾・梅十字病院前を通過するため、区間ごとの直行所要時分を別途定義
-MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC = {
-    ("BRT2急行", "餅壁駅", "舞院"): 60,
-    ("BRT2急行", "舞院", "くるみや"): 60,
-    ("BRT2急行", "くるみや", "串橋"): 85,
-}
+def _parse_track_count(facilities: str) -> int:
+    """「2面4線」のような設備文字列からホーム線路の本数を取り出す。読み取れなければ2本とする。"""
+    m = re.search(r"面(\d+)線", facilities or "")
+    if m:
+        return max(1, int(m.group(1)))
+    return 2
 
 
-MOCHIKABE_BRT3_STATIONS = [
-    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "BRT1・BRT2と接続。循環系統の起終点。"},
-    {"name": "アクロス", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "夏吉", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "東新地", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "望洲町", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "若潟駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": ""},
-    {"name": "餅壁駅", "facilities": "バス停留所", "stops": BRT_SERVICE_TYPES, "notes": "循環系統の起終点（1周して戻る）。"},
-]
-MOCHIKABE_BRT3_RUN_TIMES_SEC = [30, 30, 30, 30, 45, 45]  # 餅壁駅-アクロス-夏吉-東新地-望洲町-若潟駅-餅壁駅
-MOCHIKABE_BRT3_NOTES = (
-    "餅壁駅発着の循環（ループ）系統。餅壁駅→アクロス→夏吉→東新地→望洲町→若潟駅→餅壁駅の順に"
-    "一周する。逆回りの系統としても運行できる。"
-)
+def format_oud2_time(total_seconds) -> str:
+    """0時からの経過秒を OuDiaSecond の時刻表記（H[H]MM[SS]）に変換する。"""
+    total_seconds = int(round(total_seconds))
+    h, rem = divmod(total_seconds, 3600)
+    m, s = divmod(rem, 60)
+    if s == 0:
+        return f"{h}{m:02d}"
+    return f"{h}{m:02d}{s:02d}"
 
 
-# ---------------------------------------------------------------------------
-# 虹の原BRT（BRT1・BRT1-2・BRT1-4。いずれも一方通行の循環系統で、折り返しなし）
-# ---------------------------------------------------------------------------
-
-# --- BRT1: あおなみセンター発着の一方通行循環 ---
-# あおなみセンター-虹の原中央間は普段の往復と同じように運行されるが、
-# 虹の原中央-鶴巻団地-月見原-運動公園-春町公園-あけぼの-虹の原中央のループ部分は
-# 一方通行（逆回りはしない）。1周ぶんの経路として1本の片道列車で表現する。
-NIJINOHARA_BRT1_STATIONS = [
-    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫（鶴巻団地）からの出庫先。"},
-    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの起点（出）。"},
-    {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "車庫あり。"},
-    {"name": "波平入口", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-    {"name": "あけぼの", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1"], "notes": "ループの終点（戻り）。"},
-    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1"], "notes": ""},
-]
-NIJINOHARA_BRT1_RUN_TIMES_SEC = [45, 60, 40, 35, 45, 45, 45, 60, 45]
-NIJINOHARA_BRT1_NOTES = (
-    "あおなみセンター発着の一方通行循環系統（逆回りはしない）。"
-    "あおなみセンター〜虹の原中央間は通常どおり運行し、虹の原中央から先は"
-    "鶴巻団地→波平入口→月見原→運動公園→春町公園→あけぼの→虹の原中央の順に1周してから"
-    "あおなみセンターへ戻る。車庫は鶴巻団地にあり、出庫時は"
-    "鶴巻団地→虹の原中央→あおなみセンターの順で運行する。"
-)
-
-# --- BRT1-2: あけぼの止まり（あけぼので運行終了、折り返しなし） ---
-NIJINOHARA_BRT1_2_STATIONS = [
-    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "鶴巻団地", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "波平入口", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": ""},
-    {"name": "あけぼの", "facilities": "バス停留所", "stops": ["BRT1-2"], "notes": "終点。ここから先へは折り返さない。"},
-]
-NIJINOHARA_BRT1_2_RUN_TIMES_SEC = [45, 60, 40, 35, 45, 45, 45]
-NIJINOHARA_BRT1_2_NOTES = "あおなみセンターからあけぼの止まりの系統。あけぼのから先の折り返しはできない。"
-
-# --- BRT1-4: 虹の原中央〜美南鳥羽（往路と復路で経由地が異なる一方通行の周回） ---
-NIJINOHARA_BRT1_4_STATIONS = [
-    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "団地西", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "月見原", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "九十九町", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "美南鳥羽", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": "折り返し地点。"},
-    {"name": "九十九町", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "運動公園", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "春町公園", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "虹の原中央", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-    {"name": "あおなみセンター", "facilities": "バス停留所", "stops": ["BRT1-4"], "notes": ""},
-]
-NIJINOHARA_BRT1_4_RUN_TIMES_SEC = [40, 40, 30, 40, 40, 45, 45, 90, 45]
-NIJINOHARA_BRT1_4_NOTES = (
-    "虹の原中央から団地西・月見原・九十九町を経て美南鳥羽へ向かい、"
-    "美南鳥羽からは運動公園・春町公園を経由する別経路で虹の原中央・あおなみセンターへ戻る、"
-    "往路と復路で経由地が異なる一方通行の系統。"
-)
+def _append_eki_blocks(lines: list, stations: list):
+    for station in stations:
+        track_count = _parse_track_count(station.get("facilities", ""))
+        lines.append("Eki.")
+        lines.append(f"Ekimei={station['name']}")
+        lines.append("Ekijikokukeisiki=Jikokukeisiki_Hatsuchaku")
+        lines.append("Ekikibo=Ekikibo_Ippan")
+        lines.append("DownMain=1")
+        lines.append("UpMain=2")
+        lines.append("EkiTrack2Cont.")
+        for i in range(1, track_count + 1):
+            lines.append("EkiTrack2.")
+            lines.append(f"TrackName={i}番線")
+            lines.append(f"TrackRyakusyou={i}")
+            lines.append(".")
+        lines.append(".")
+        lines.append(".")
 
 
-def build_line_context_text() -> str:
-    """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
-    lines = ["# 尾羽急本線 路線データ", ""]
-    lines.append(f"運行種別: {', '.join(SERVICE_TYPES)}")
-    lines.append("")
-    lines.append("## 駅一覧（起点から終点の順）")
-    for i, st in enumerate(STATIONS):
-        lines.append(
-            f"- {st['code']} {st['name']}: 設備={st['facilities']} / "
-            f"停車種別={'・'.join(st['stops'])}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
+def _append_ressyasyubetsu_blocks(lines: list, service_types: list):
+    for i, name in enumerate(service_types):
+        lines.append("Ressyasyubetsu.")
+        lines.append(f"Syubetsumei={name}")
+        lines.append(f"Ryakusyou={name[:2]}")
+        lines.append("JikokuhyouMojiColor=00000000")
+        lines.append("JikokuhyouFontIndex=0")
+        lines.append("JikokuhyouBackColor=00FFFFFF")
+        lines.append(f"DiagramSenColor={_SERVICE_COLORS[i % len(_SERVICE_COLORS)]}")
+        lines.append("DiagramSenStyle=SenStyle_Jissen")
+        lines.append("StopMarkDrawType=EStopMarkDrawType_DrawOnStop")
+        lines.append(".")
+
+
+def _station_platform_index(stations: list, station_idx: int, direction: str) -> int:
+    """
+    駅の設備（番線数）をもとに、方向ごとに使う番線インデックス（0始まり）を決める。
+    下りは0番目、上りは2番線以上ある駅なら1番目、1線しかない駅は0番目を使う。
+    """
+    track_count = _parse_track_count(stations[station_idx].get("facilities", ""))
+    if direction == "Kudari":
+        return 0
+    return 1 if track_count > 1 else 0
+
+
+# 停車しない駅を「なし（経路に含まれない）」として扱う種別名。
+# 各路線の「最も基本的な種別」（各駅停車・普通）はその性質上、停まらない駅には
+# そもそも来ない（なし扱い）と考え、それ以外の種別（快速・急行など）は
+# 物理的にはその駅を通るが停まらないだけなので「通過」として扱う。
+NONE_INSTEAD_OF_PASS_SERVICES = {"各停", "普通"}
+
+
+def _ekijikoku_field(stations: list, direction: str, stops: dict, service: str) -> str:
+    """
+    stations: この路線の駅リスト（順序が物理的な並び順）
+    stops: {駅インデックス(0-based, stationsの並び順): (着時刻sec or None, 発時刻sec or None)}
+           通過する駅は (None, None) を、経路に含まれない駅はキー自体を省略する。
+    service: 列車種別名。停まらない駅を「なし」にするか「通過」にするかの判定に使う。
+    """
+    n = len(stations)
+    order = range(n) if direction == "Kudari" else range(n - 1, -1, -1)
+    use_none = service in NONE_INSTEAD_OF_PASS_SERVICES
+
+    entries = []
+    for idx in order:
+        if idx not in stops:
+            entries.append("")
+            continue
+        arr, dep = stops[idx]
+        platform = _station_platform_index(stations, idx, direction)
+        if arr is None and dep is None:
+            if use_none:
+                entries.append("")  # 「なし」：この種別はそもそもこの駅に来ない扱い
+            else:
+                entries.append(f"2${platform}")  # 「通過」：先頭固定"2"、時刻なし
+        elif arr is None and dep is not None:
+            entries.append(f"1;{format_oud2_time(dep)}${platform}")  # 起点
+        elif arr is not None and dep is None:
+            entries.append(f"1;{format_oud2_time(arr)}/${platform}")  # 終点
+        else:
+            entries.append(
+                f"1;{format_oud2_time(arr)}/{format_oud2_time(dep)}${platform}"
+            )  # 中間停車
+    return ",".join(entries)
+
+
+def _append_ressya(
+    lines: list, stations: list, direction: str, service_index: int,
+    service_name: str, train_number: str, stops: dict,
+):
+    lines.append("Ressya.")
+    lines.append(f"Houkou={direction}")
+    lines.append(f"Syubetsu={service_index}")
+    if train_number:
+        lines.append(f"Ressyabangou={train_number}")
+    lines.append(f"EkiJikoku={_ekijikoku_field(stations, direction, stops, service_name)}")
+    lines.append(".")
+
+
+def _append_dia_block(
+    lines: list, stations: list, service_types: list, dia_name: str,
+    kudari_trains: list, nobori_trains: list,
+):
+    lines.append("Dia.")
+    lines.append(f"DiaName={dia_name}")
+    lines.append("Kudari.")
+    for t in kudari_trains:
+        _append_ressya(
+            lines, stations, "Kudari", t["service_index"], service_types[t["service_index"]],
+            t.get("train_number", ""), t["stops"],
         )
-
-    lines.append("")
-    lines.append("## 駅間所要時分（秒）")
-    for i in range(len(STATIONS) - 1):
-        a = STATIONS[i]["name"]
-        b = STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {RUN_TIMES_SEC[i]}秒")
-
-    # --- 千鳥支線 ---
-    lines.append("")
-    lines.append("# 千鳥支線 路線データ（本郷 - 千鳥）")
-    lines.append(CHIDORI_BRANCH_NOTES)
-    lines.append("")
-    lines.append("## 駅一覧（本郷から千鳥の順）")
-    for st in CHIDORI_BRANCH_STATIONS:
-        lines.append(
-            f"- {st['name']}: 設備={st['facilities']}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
+    lines.append(".")
+    lines.append("Nobori.")
+    for t in nobori_trains:
+        _append_ressya(
+            lines, stations, "Nobori", t["service_index"], service_types[t["service_index"]],
+            t.get("train_number", ""), t["stops"],
         )
-    lines.append("")
-    lines.append("## 駅間所要時分（秒）")
-    for i in range(len(CHIDORI_BRANCH_STATIONS) - 1):
-        a = CHIDORI_BRANCH_STATIONS[i]["name"]
-        b = CHIDORI_BRANCH_STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {CHIDORI_BRANCH_RUN_TIMES_SEC[i]}秒")
+    lines.append(".")
+    lines.append(".")
 
-    # --- 井問線 ---
-    lines.append("")
-    lines.append("# 井問線（いといせん）路線データ（井口 - 千鳥）")
-    lines.append(f"運行種別: {', '.join(ITOI_LINE_SERVICE_TYPES)}")
-    lines.append(ITOI_LINE_NOTES)
-    lines.append("")
-    lines.append("## 駅一覧（井口から千鳥の順）")
-    for st in ITOI_LINE_STATIONS:
-        lines.append(
-            f"- {st['name']}: 設備={st['facilities']} / "
-            f"停車種別={'・'.join(st['stops'])}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
-        )
-    lines.append("")
-    lines.append("## 駅間所要時分（秒）")
-    for i in range(len(ITOI_LINE_STATIONS) - 1):
-        a = ITOI_LINE_STATIONS[i]["name"]
-        b = ITOI_LINE_STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {ITOI_LINE_RUN_TIMES_SEC[i]}秒")
-    lines.append("")
-    lines.append("## 急行の区間直行所要時分（秒）")
-    for (a, b), sec in ITOI_LINE_EXPRESS_RUN_TIMES_SEC.items():
-        lines.append(f"- {a} - {b}: {sec}秒")
 
-    # --- 東阪モノレール ---
-    lines.append("")
-    lines.append("# 東阪モノレール 路線データ（山樺町 - 今台空港）")
-    lines.append(f"運行種別: {', '.join(TOZAKA_MONORAIL_SERVICE_TYPES)}")
-    lines.append(TOZAKA_MONORAIL_NOTES)
-    lines.append("")
-    lines.append("## 駅一覧（山樺町から今台空港の順、普通は全駅停車）")
+def build_oud2_file(
+    line_name: str, dia_name: str, stations: list, service_types: list,
+    kudari_trains: list, nobori_trains: list,
+) -> str:
+    """
+    stations: この路線の駅リスト（各要素は最低限 "name" キーを持つ辞書。"facilities"は任意）
+    service_types: この路線の運行種別名のリスト
+    kudari_trains / nobori_trains: [{"service_index": int, "train_number": str, "stops": {...}}]
+    戻り値: UTF-8 BOM付き・CRLF改行の.oud2ファイル本文（文字列）
+    """
+    lines = [
+        "FileType=OuDiaSecond.1.15",
+        "Rosen.",
+        f"Rosenmei={line_name}",
+        "KudariDiaAlias=",
+        "NoboriDiaAlias=",
+    ]
+    _append_eki_blocks(lines, stations)
+    _append_ressyasyubetsu_blocks(lines, service_types)
+    _append_dia_block(lines, stations, service_types, dia_name, kudari_trains, nobori_trains)
+    lines.append(".")  # Rosen.を閉じる
+    lines.append("FileTypeAppComment=Generated by 鉄道ダイヤ作成専門AI")
+    return "\ufeff" + CRLF.join(lines) + CRLF
+
+
+# 種別ごとの運転間隔（秒）。数字が小さいほど本数が多い。
+DEFAULT_HEADWAY_SEC = {
+    "各停": 8 * 60,
+    "準急": 12 * 60,
+    "快速": 15 * 60,
+    "急行": 20 * 60,
+    "快速急行": 30 * 60,
+    "エアポート急行": 40 * 60,
+    "区間急行": 20 * 60,
+}
+OPERATION_START_SEC = 6 * 3600   # 6:00 始発
+OPERATION_END_SEC = 24 * 3600    # 24:00 まで運転
+
+
+# 種別ごとの運転間隔（秒）のデフォルト値。数字が小さいほど本数が多い。
+# 路線ごとに存在する種別だけが参照される。
+DEFAULT_HEADWAY_SEC = {
+    "各停": 8 * 60,
+    "普通": 10 * 60,
+    "準急": 12 * 60,
+    "快速": 15 * 60,
+    "急行": 20 * 60,
+    "快速急行": 30 * 60,
+    "エアポート急行": 40 * 60,
+    "空港快速": 20 * 60,
+    "区間急行": 20 * 60,
+}
+OPERATION_START_SEC = 6 * 3600   # 6:00 始発
+OPERATION_END_SEC = 24 * 3600    # 24:00 まで運転
+
+
+def _compute_stops_for_service(
+    stations: list, run_times_sec: list, service: str, direction: str,
+    start_sec: int, dwell_sec: int, express_times: dict = None,
+) -> dict:
+    """
+    指定した路線・種別・方向・始発時刻の列車1本ぶんの{駅インデックス: (着, 発)}を計算する。
+
+    express_times: {(種別名, 停車駅A, 停車駅B): 秒} の形式で、AからBまでの直行所要時分を
+                    個別指定できる（急行等が途中駅を通過して普通より速く走る場合に使う）。
+                    指定がない区間は、各駅間の所要時分（run_times_sec）を素直に積み上げる。
+    """
+    express_times = express_times or {}
+    n = len(stations)
+    seq = list(range(n)) if direction == "Kudari" else list(range(n - 1, -1, -1))
+
+    stops = {}
+    t = start_sec
+    last_stop_pos = None
+    for pos, idx in enumerate(seq):
+        station = stations[idx]
+        if pos > 0:
+            prev_idx = seq[pos - 1]
+            seg_index = min(idx, prev_idx)
+            t += run_times_sec[seg_index]
+
+        stops_here = service in station["stops"]
+        if not stops_here:
+            stops[idx] = (None, None)
+            continue
+
+        # 直前の停車駅からこの駅までの直行所要時分が個別指定されていれば、
+        # 積み上げ計算のtを上書きする（急行等の通過運転を正しく反映するため）
+        if last_stop_pos is not None and express_times:
+            prev_idx2 = seq[last_stop_pos]
+            key = (service, stations[prev_idx2]["name"], station["name"])
+            if key in express_times:
+                prev_dep = stops[prev_idx2][1]
+                t = prev_dep + express_times[key]
+
+        if pos == 0:
+            stops[idx] = (None, t)
+        elif pos == n - 1:
+            stops[idx] = (t, None)
+        else:
+            arr = t
+            dep = t + dwell_sec
+            stops[idx] = (arr, dep)
+            t = dep
+        last_stop_pos = pos
+
+    return stops
+
+
+def build_full_day_trains(
+    stations: list,
+    run_times_sec: list,
+    service_types: list,
+    express_times: dict = None,
+    start_sec: int = OPERATION_START_SEC,
+    end_sec: int = OPERATION_END_SEC,
+    dwell_sec: int = DEFAULT_DWELL_SEC,
+    headways: dict = None,
+    one_way: bool = False,
+):
+    """
+    種別・方向ごとに、始発から終電まで運転間隔どおりに列車を並べた終日ダイヤを生成する。
+    one_way=True の場合、逆方向（上り）の列車は作らない
+    （一方通行の循環系統など、折り返しが存在しない経路向け）。
+    """
+    headways = headways or {}
+    kudari_trains = []
+    nobori_trains = []
+
+    for service_index, service in enumerate(service_types):
+        headway = headways.get(service, DEFAULT_HEADWAY_SEC.get(service, 20 * 60))
+
+        seq = 1
+        t = start_sec
+        while t < end_sec:
+            stops = _compute_stops_for_service(
+                stations, run_times_sec, service, "Kudari", t, dwell_sec, express_times
+            )
+            train_number = f"{service_index + 1}0{seq:03d}"
+            kudari_trains.append(
+                {"service_index": service_index, "train_number": train_number, "stops": stops}
+            )
+            seq += 1
+            t += headway
+
+        if one_way:
+            continue
+
+        seq = 1
+        t = start_sec
+        while t < end_sec:
+            stops = _compute_stops_for_service(
+                stations, run_times_sec, service, "Nobori", t, dwell_sec, express_times
+            )
+            train_number = f"{service_index + 1}5{seq:03d}"
+            nobori_trains.append(
+                {"service_index": service_index, "train_number": train_number, "stops": stops}
+            )
+            seq += 1
+            t += headway
+
+    return kudari_trains, nobori_trains
+
+
+def _tozaka_stations_with_stops() -> list:
+    """東阪モノレールは駅データに"stops"が無いため、ここで組み立てる。"""
+    result = []
     for st in TOZAKA_MONORAIL_STATIONS:
-        lines.append(
-            f"- {st['name']}: 設備={st['facilities']}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
-        )
-    lines.append("")
-    lines.append("## 普通の駅間所要時分（秒）")
-    for i in range(len(TOZAKA_MONORAIL_STATIONS) - 1):
-        a = TOZAKA_MONORAIL_STATIONS[i]["name"]
-        b = TOZAKA_MONORAIL_STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_RUN_TIMES_SEC[i]}秒")
-    lines.append("")
-    lines.append(f"## 空港快速の停車駅: {'・'.join(TOZAKA_MONORAIL_EXPRESS_STOPS)}")
-    lines.append("## 空港快速の停車駅間の直行所要時分（秒）")
+        stops = list(TOZAKA_MONORAIL_SERVICE_TYPES) if st["name"] in TOZAKA_MONORAIL_EXPRESS_STOPS else ["普通"]
+        result.append({**st, "stops": stops})
+    return result
+
+
+def _tozaka_express_times() -> dict:
+    times = {}
     for i in range(len(TOZAKA_MONORAIL_EXPRESS_STOPS) - 1):
         a = TOZAKA_MONORAIL_EXPRESS_STOPS[i]
         b = TOZAKA_MONORAIL_EXPRESS_STOPS[i + 1]
-        lines.append(f"- {a} - {b}: {TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC[i]}秒")
+        times[("空港快速", a, b)] = TOZAKA_MONORAIL_EXPRESS_RUN_TIMES_SEC[i]
+    return times
 
-    # --- 尾羽急高速線 ---
-    lines.append("")
-    lines.append("# 尾羽急高速線 路線データ（千鳥 - 金田）")
-    lines.append(f"運行種別: {', '.join(RAPID_LINE_SERVICE_TYPES)}")
-    lines.append(RAPID_LINE_NOTES)
-    lines.append("")
-    lines.append("## 駅一覧（千鳥から金田の順）")
-    for st in RAPID_LINE_STATIONS:
-        lines.append(
-            f"- {st['name']}: 設備={st['facilities']} / "
-            f"停車種別={'・'.join(st['stops'])}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
-        )
-    lines.append("")
-    lines.append("## 各停の駅間所要時分（秒）")
-    for i in range(len(RAPID_LINE_STATIONS) - 1):
-        a = RAPID_LINE_STATIONS[i]["name"]
-        b = RAPID_LINE_STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {RAPID_LINE_RUN_TIMES_SEC[i]}秒")
-    lines.append("")
-    lines.append("## 急行・快速急行の区間直行所要時分（秒）")
-    for (service, a, b), sec in RAPID_LINE_EXPRESS_RUN_TIMES_SEC.items():
-        lines.append(f"- [{service}] {a} - {b}: {sec}秒")
 
-    # --- 金田線 ---
-    lines.append("")
-    lines.append("# 金田線 路線データ（金田 - 金田新都心）")
-    lines.append(f"運行種別: {', '.join(KANADA_LINE_SERVICE_TYPES)}")
-    lines.append(KANADA_LINE_NOTES)
-    lines.append("")
-    lines.append("## 駅一覧（金田から金田新都心の順）")
-    for st in KANADA_LINE_STATIONS:
-        lines.append(
-            f"- {st['name']}: 設備={st['facilities'] or '未設定'} / "
-            f"停車種別={'・'.join(st['stops'])}"
-            + (f" / 備考={st['notes']}" if st["notes"] else "")
-        )
-    lines.append("")
-    lines.append("## 各停の駅間所要時分（秒）")
-    for i in range(len(KANADA_LINE_STATIONS) - 1):
-        a = KANADA_LINE_STATIONS[i]["name"]
-        b = KANADA_LINE_STATIONS[i + 1]["name"]
-        lines.append(f"- {a} - {b}: {KANADA_LINE_RUN_TIMES_SEC[i]}秒")
+def _chidori_stations_with_stops() -> list:
+    """千鳥支線は運行種別が「普通」のみのため、全駅が停車駅になる。"""
+    return [{**st, "stops": ["普通"]} for st in CHIDORI_BRANCH_STATIONS]
 
-    # --- 餅壁BRT ---
-    brt_routes = [
-        ("BRT1", MOCHIKABE_BRT1_STATIONS, MOCHIKABE_BRT1_RUN_TIMES_SEC, MOCHIKABE_BRT1_NOTES),
-        ("BRT2", MOCHIKABE_BRT2_STATIONS, MOCHIKABE_BRT2_RUN_TIMES_SEC, MOCHIKABE_BRT2_NOTES),
-        ("BRT3", MOCHIKABE_BRT3_STATIONS, MOCHIKABE_BRT3_RUN_TIMES_SEC, MOCHIKABE_BRT3_NOTES),
-    ]
-    lines.append("")
-    lines.append("# 餅壁BRT 路線データ（BRT1・BRT2・BRT3の3系統）")
-    lines.append(
-        "各系統とも基本の運行種別はBRT（各停）で、全停留所に停車し、双方向（往復）とも運行する。"
-        "BRT2のみBRT2急行も運行しており、一部停留所を通過する。"
+
+def _itoi_express_times() -> dict:
+    times = {}
+    for (a, b), sec in ITOI_LINE_EXPRESS_RUN_TIMES_SEC.items():
+        times[("急行", a, b)] = sec
+    return times
+
+
+# 路線ごとの定義一覧。全路線分の.oud2を一括生成する際に使う。
+LINE_DEFS = [
+    {
+        "key": "obakyu_main",
+        "line_name": "尾羽急本線",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": STATIONS,
+        "service_types": SERVICE_TYPES,
+        "run_times_sec": RUN_TIMES_SEC,
+        "express_times": {},
+    },
+    {
+        "key": "chidori_branch",
+        "line_name": "千鳥支線",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": _chidori_stations_with_stops(),
+        "service_types": ["普通"],
+        "run_times_sec": CHIDORI_BRANCH_RUN_TIMES_SEC,
+        "express_times": {},
+    },
+    {
+        "key": "itoi_line",
+        "line_name": "井問線",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": ITOI_LINE_STATIONS,
+        "service_types": ITOI_LINE_SERVICE_TYPES,
+        "run_times_sec": ITOI_LINE_RUN_TIMES_SEC,
+        "express_times": _itoi_express_times(),
+    },
+    {
+        "key": "tozaka_monorail",
+        "line_name": "東阪モノレール",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": _tozaka_stations_with_stops(),
+        "service_types": TOZAKA_MONORAIL_SERVICE_TYPES,
+        "run_times_sec": TOZAKA_MONORAIL_RUN_TIMES_SEC,
+        "express_times": _tozaka_express_times(),
+    },
+    {
+        "key": "rapid_line",
+        "line_name": "尾羽急高速線",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": RAPID_LINE_STATIONS,
+        "service_types": RAPID_LINE_SERVICE_TYPES,
+        "run_times_sec": RAPID_LINE_RUN_TIMES_SEC,
+        "express_times": RAPID_LINE_EXPRESS_RUN_TIMES_SEC,
+    },
+    {
+        "key": "kanada_line",
+        "line_name": "金田線",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": KANADA_LINE_STATIONS,
+        "service_types": KANADA_LINE_SERVICE_TYPES,
+        "run_times_sec": KANADA_LINE_RUN_TIMES_SEC,
+        "express_times": {},
+    },
+    {
+        "key": "mochikabe_brt1",
+        "line_name": "餅壁BRT1",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": MOCHIKABE_BRT1_STATIONS,
+        "service_types": BRT_SERVICE_TYPES,
+        "run_times_sec": MOCHIKABE_BRT1_RUN_TIMES_SEC,
+        "express_times": {},
+    },
+    {
+        "key": "mochikabe_brt2",
+        "line_name": "餅壁BRT2",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": MOCHIKABE_BRT2_STATIONS,
+        "service_types": BRT2_SERVICE_TYPES,
+        "run_times_sec": MOCHIKABE_BRT2_RUN_TIMES_SEC,
+        "express_times": MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC,
+    },
+    {
+        "key": "mochikabe_brt3",
+        "line_name": "餅壁BRT3",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": MOCHIKABE_BRT3_STATIONS,
+        "service_types": BRT_SERVICE_TYPES,
+        "run_times_sec": MOCHIKABE_BRT3_RUN_TIMES_SEC,
+        "express_times": {},
+    },
+    {
+        "key": "aonami_brt1",
+        "line_name": "虹の原BRT1",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": NIJINOHARA_BRT1_STATIONS,
+        "service_types": ["BRT1"],
+        "run_times_sec": NIJINOHARA_BRT1_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
+    {
+        "key": "aonami_brt1_2",
+        "line_name": "虹の原BRT1-2",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": NIJINOHARA_BRT1_2_STATIONS,
+        "service_types": ["BRT1-2"],
+        "run_times_sec": NIJINOHARA_BRT1_2_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
+    {
+        "key": "aonami_brt1_4",
+        "line_name": "虹の原BRT1-4",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": NIJINOHARA_BRT1_4_STATIONS,
+        "service_types": ["BRT1-4"],
+        "run_times_sec": NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
+        "express_times": {},
+        "one_way": True,
+    },
+]
+
+
+def build_oud2_for_line(line_def: dict, headway_sec: int = None) -> bytes:
+    """
+    LINE_DEFSの1路線ぶんの定義から、終日ダイヤの.oud2ファイルをバイト列で返す。
+    headway_secを指定すると、全種別の運転間隔をその秒数に統一する
+    （「過密ダイヤ」のように、本数を機械的に増やしたい場合に使う）。
+    """
+    headways = None
+    if headway_sec:
+        headways = {name: headway_sec for name in line_def["service_types"]}
+    kudari_trains, nobori_trains = build_full_day_trains(
+        stations=line_def["stations"],
+        run_times_sec=line_def["run_times_sec"],
+        service_types=line_def["service_types"],
+        express_times=line_def.get("express_times"),
+        one_way=line_def.get("one_way", False),
+        headways=headways,
     )
-    for route_name, route_stations, route_times, route_notes in brt_routes:
-        lines.append("")
-        lines.append(f"## {route_name}（{route_stations[0]['name']} - {route_stations[-1]['name']}）")
-        lines.append(route_notes)
-        for st in route_stations:
-            lines.append(
-                f"- {st['name']}: 停車種別={'・'.join(st['stops'])}"
-                + (f" / 備考={st['notes']}" if st["notes"] else "")
-            )
-        lines.append(f"### {route_name}の停留所間所要時分（秒、BRT＝各停）")
-        for i in range(len(route_stations) - 1):
-            a = route_stations[i]["name"]
-            b = route_stations[i + 1]["name"]
-            lines.append(f"- {a} - {b}: {route_times[i]}秒")
-
-    lines.append("")
-    lines.append("### BRT2急行の停車駅間の直行所要時分（秒）")
-    for (service, a, b), sec in MOCHIKABE_BRT2_EXPRESS_RUN_TIMES_SEC.items():
-        lines.append(f"- {a} - {b}: {sec}秒")
-
-    # --- 虹の原BRT ---
-    aonami_routes = [
-        ("BRT1", NIJINOHARA_BRT1_STATIONS, NIJINOHARA_BRT1_RUN_TIMES_SEC, NIJINOHARA_BRT1_NOTES),
-        ("BRT1-2", NIJINOHARA_BRT1_2_STATIONS, NIJINOHARA_BRT1_2_RUN_TIMES_SEC, NIJINOHARA_BRT1_2_NOTES),
-        ("BRT1-4", NIJINOHARA_BRT1_4_STATIONS, NIJINOHARA_BRT1_4_RUN_TIMES_SEC, NIJINOHARA_BRT1_4_NOTES),
-    ]
-    lines.append("")
-    lines.append("# 虹の原BRT 路線データ（BRT1・BRT1-2・BRT1-4の3系統）")
-    lines.append(
-        "いずれも一方通行の循環・片道系統で、折り返し運転は行わない"
-        "（逆回りのダイヤは存在しない）。"
+    text = build_oud2_file(
+        line_def["line_name"], line_def["dia_name"],
+        line_def["stations"], line_def["service_types"],
+        kudari_trains, nobori_trains,
     )
-    for route_name, route_stations, route_times, route_notes in aonami_routes:
-        lines.append("")
-        lines.append(f"## {route_name}（{route_stations[0]['name']}発 → {route_stations[-1]['name']}着）")
-        lines.append(route_notes)
-        for st in route_stations:
-            lines.append(
-                f"- {st['name']}"
-                + (f"（備考: {st['notes']}）" if st["notes"] else "")
-            )
-        lines.append(f"### {route_name}の停留所間所要時分（秒）")
-        for i in range(len(route_stations) - 1):
-            a = route_stations[i]["name"]
-            b = route_stations[i + 1]["name"]
-            lines.append(f"- {a} - {b}: {route_times[i]}秒")
+    return text.encode("utf-8")
 
-    return "\n".join(lines)
+
+# 「過密ダイヤ」のデフォルト運転間隔（秒）。実在の過密路線に近い、2分間隔。
+DENSE_HEADWAY_SEC = 120
+
+
+def build_dense_oud2(line_key: str = "obakyu_main", headway_sec: int = DENSE_HEADWAY_SEC) -> bytes:
+    """指定した路線の、全種別を短い運転間隔（デフォルト2分）に揃えた過密ダイヤの.oud2を返す。"""
+    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
+    if line_def is None:
+        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+    return build_oud2_for_line(line_def, headway_sec=headway_sec)
+
+
+def build_sample_oud2(line_name: str = "尾羽急本線", dia_name: str = "AI生成 終日ダイヤ") -> bytes:
+    """尾羽急本線単体の終日ダイヤの.oud2ファイルをバイト列で返す（後方互換用）。"""
+    line_def = next(d for d in LINE_DEFS if d["key"] == "obakyu_main")
+    return build_oud2_for_line(line_def)
+
+
+def build_all_lines_zip() -> bytes:
+    """全路線ぶんの終日ダイヤ.oud2ファイルを1つのzipにまとめてバイト列で返す。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for line_def in LINE_DEFS:
+            data = build_oud2_for_line(line_def)
+            zf.writestr(f"{line_def['key']}.oud2", data)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# チャットでユーザーが実際に依頼したダイヤ（Gemini出力のDIA_JSON）から.oud2を組み立てる
+# ---------------------------------------------------------------------------
+def _match_station_indices(stations: list, train: dict, direction: str) -> list:
+    """
+    train["stops"]に並ぶ駅名を、stations上の物理インデックスへ順に対応付ける。
+    同じ駅名が複数回登場する路線（循環系統など）でも、進行方向に沿って
+    単調に増加（Kudari）・減少（Nobori）する形でインデックスを選ぶ。
+    """
+    name_to_indices = {}
+    for idx, st in enumerate(stations):
+        name_to_indices.setdefault(st["name"], []).append(idx)
+
+    matched = []
+    last_idx = None
+    for stop in train["stops"]:
+        name = stop.get("station", "")
+        candidates = name_to_indices.get(name)
+        if not candidates:
+            raise ValueError(f"駅「{name}」がこの路線のデータに見つかりません。")
+
+        if last_idx is None:
+            chosen = candidates[0] if direction == "Kudari" else candidates[-1]
+        elif direction == "Kudari":
+            later = [c for c in candidates if c > last_idx]
+            chosen = min(later) if later else min(candidates)
+        else:
+            earlier = [c for c in candidates if c < last_idx]
+            chosen = max(earlier) if earlier else max(candidates)
+
+        matched.append(chosen)
+        last_idx = chosen
+    return matched
+
+
+def _parse_time_to_sec(value):
+    """"H:MM" または "H:MM:SS" 形式の文字列を0時からの経過秒に変換する。Noneはそのまま返す。"""
+    if value is None:
+        return None
+    parts = str(value).strip().split(":")
+    if len(parts) == 2:
+        h, m, s = parts[0], parts[1], "0"
+    elif len(parts) == 3:
+        h, m, s = parts
+    else:
+        raise ValueError(f"時刻の形式が不正です: {value!r}")
+    return int(h) * 3600 + int(m) * 60 + int(s)
+
+
+def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
+    """
+    チャットでユーザーが実際に依頼して作られたダイヤ（Geminiが出力したDIA_JSON）から
+    .oud2ファイルを組み立てる。LINE_DEFSに定義済みの路線のみ対応。
+    """
+    line_key = custom_dia.get("line_key")
+    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
+    if line_def is None:
+        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+
+    stations = line_def["stations"]
+    service_types = line_def["service_types"]
+
+    kudari_trains = []
+    nobori_trains = []
+
+    for train in custom_dia.get("trains", []):
+        direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
+        service_name = train.get("service")
+        service_index = service_types.index(service_name) if service_name in service_types else 0
+
+        indices = _match_station_indices(stations, train, direction)
+        if not indices:
+            continue
+
+        stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
+        for pos, idx in enumerate(indices):
+            stop = train["stops"][pos]
+            stops[idx] = (_parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure")))
+
+        entry = {
+            "service_index": service_index,
+            "train_number": str(train.get("train_number") or ""),
+            "stops": stops,
+        }
+        (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
+
+    dia_name = custom_dia.get("dia_name") or "お願いしたダイヤ"
+    text = build_oud2_file(
+        line_def["line_name"], dia_name, stations, service_types, kudari_trains, nobori_trains
+    )
+    return text.encode("utf-8")
