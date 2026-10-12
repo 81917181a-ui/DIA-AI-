@@ -568,14 +568,22 @@ LINE_DEFS = [
 ]
 
 
-def build_oud2_for_line(line_def: dict) -> bytes:
-    """LINE_DEFSの1路線ぶんの定義から、終日ダイヤの.oud2ファイルをバイト列で返す。"""
+def build_oud2_for_line(line_def: dict, headway_sec: int = None) -> bytes:
+    """
+    LINE_DEFSの1路線ぶんの定義から、終日ダイヤの.oud2ファイルをバイト列で返す。
+    headway_secを指定すると、全種別の運転間隔をその秒数に統一する
+    （「過密ダイヤ」のように、本数を機械的に増やしたい場合に使う）。
+    """
+    headways = None
+    if headway_sec:
+        headways = {name: headway_sec for name in line_def["service_types"]}
     kudari_trains, nobori_trains = build_full_day_trains(
         stations=line_def["stations"],
         run_times_sec=line_def["run_times_sec"],
         service_types=line_def["service_types"],
         express_times=line_def.get("express_times"),
         one_way=line_def.get("one_way", False),
+        headways=headways,
     )
     text = build_oud2_file(
         line_def["line_name"], line_def["dia_name"],
@@ -583,6 +591,18 @@ def build_oud2_for_line(line_def: dict) -> bytes:
         kudari_trains, nobori_trains,
     )
     return text.encode("utf-8")
+
+
+# 「過密ダイヤ」のデフォルト運転間隔（秒）。実在の過密路線に近い、2分間隔。
+DENSE_HEADWAY_SEC = 120
+
+
+def build_dense_oud2(line_key: str = "obakyu_main", headway_sec: int = DENSE_HEADWAY_SEC) -> bytes:
+    """指定した路線の、全種別を短い運転間隔（デフォルト2分）に揃えた過密ダイヤの.oud2を返す。"""
+    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
+    if line_def is None:
+        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+    return build_oud2_for_line(line_def, headway_sec=headway_sec)
 
 
 def build_sample_oud2(line_name: str = "尾羽急本線", dia_name: str = "AI生成 終日ダイヤ") -> bytes:
