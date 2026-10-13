@@ -110,11 +110,11 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
 - ユーザーから具体的な列車・ダイヤの作成を頼まれ、実際に時刻表（駅名と時刻の組み合わせ）を
   提示した場合は、回答の最後に、画面には表示されない次の形式のコメントブロックを必ず追加すること。
   これは後でこのダイヤを.oud2ファイルとして書き出すために使う、機械可読なデータである。
-  <!--DIA_JSON
-  {{"line_key": "<路線キー>", "trains": [{{"train_number": "<列車番号>", "direction": "Kudari または Nobori",
+  <!--DIA_JSON {{"line_key": "<路線キー>", "trains": [{{"train_number": "<列車番号>", "direction": "Kudari または Nobori",
   "service": "<種別名>", "stops": [{{"station": "<駅名>", "arrival": "H:MM:SS または null",
-  "departure": "H:MM:SS または null"}}, ...]}}, ...]}}
-  DIA_JSON-->
+  "departure": "H:MM:SS または null"}}, ...]}}, ...]}} -->
+  - 必ずこのブロック全体を1行（改行なし）で出力し、通常のHTMLコメントと同じように
+    "-->" だけで閉じること（"DIA_JSON-->" のように閉じタグに名前を繰り返さないこと）。
   - line_keyは必ず次のいずれかにすること: {line_keys}
   - stationsの駅名は、その路線データに実際にある駅名と完全に一致させること。
   - 停車しない（通過する）駅はstopsの配列に含めない。
@@ -344,12 +344,14 @@ def try_extract_rename_request(user_input: str):
     return None
 
 
-DIA_JSON_PATTERN = re.compile(r"<!--DIA_JSON\s*(.*?)\s*DIA_JSON-->", re.DOTALL)
+# Geminiが閉じタグを「DIA_JSON-->」「-->」のどちらで書いても拾えるよう、
+# 開始マーカーの後、最初に出てくる「-->」までを丸ごと対象にする
+DIA_JSON_PATTERN = re.compile(r"<!--DIA_JSON\s*(.*?)\s*(?:DIA_JSON)?-->", re.DOTALL)
 
 
 def extract_dia_json(reply_text: str):
     """
-    Geminiの返答の中から <!--DIA_JSON ... DIA_JSON--> ブロックを取り出してパースする。
+    Geminiの返答の中から <!--DIA_JSON ... --> ブロックを取り出してパースする。
     戻り値: (表示用に取り除いた本文, パースできたdictまたはNone)
     """
     m = DIA_JSON_PATTERN.search(reply_text)
