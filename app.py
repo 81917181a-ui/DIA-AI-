@@ -320,6 +320,21 @@ def save_conversation_messages(db, conversation_id: str, messages: list):
     )
 
 
+def save_conversation_messages_async(db, conversation_id: str, messages: list):
+    """
+    Firestoreへの保存を裏側のスレッドで行い、保存完了を待たずに画面操作へ戻れるようにする。
+    画面上のキャッシュ（st.session_state）には呼び出し側が先に反映しておくこと。
+    """
+    def _save():
+        try:
+            save_conversation_messages(db, conversation_id, messages)
+        except Exception as e:
+            # 裏側の保存なので、失敗してもアプリは止めない（ログにだけ残す）
+            print(f"[save] チャット保存に失敗しました: {type(e).__name__}: {e}", flush=True)
+
+    threading.Thread(target=_save, daemon=True).start()
+
+
 def rename_conversation(db, conversation_id: str, new_title: str):
     new_title = new_title.strip() or DEFAULT_TITLE
     db.collection(CONVERSATIONS_COLLECTION).document(conversation_id).update(
@@ -1032,9 +1047,10 @@ def main():
         if new_custom_dia:
             assistant_message["custom_dia"] = new_custom_dia
         messages.append(assistant_message)
-        save_conversation_messages(db, current_id, messages)
-        # 今回のやり取りはもう手元にあるので、次の再実行でFirestoreを読み直さずに使う
+        # 画面側のキャッシュには即座に反映し、Firestoreへの実際の書き込みは裏側で行う
+        # （保存の完了を待たずに次の操作へ進めるようにするため）
         set_messages_cache(current_id, messages)
+        save_conversation_messages_async(db, current_id, messages)
 
         # リネーム指示ではなく、かつ最初のやり取りの場合はユーザーの発言からチャット名を自動でつける
         if rename_target or is_new_conversation:
