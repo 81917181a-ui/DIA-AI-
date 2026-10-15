@@ -239,6 +239,39 @@ def cleanup_expired_async(db):
     threading.Thread(target=cleanup_expired, args=(db, state), daemon=True).start()
 
 
+def get_conversations_cached(db, session_id: str) -> list:
+    """
+    チャット一覧をst.session_stateにキャッシュし、メニューの開閉などデータが変わらない
+    操作のたびにFirestoreへ読みに行かないようにする。新規作成・リネーム・削除の直後は
+    invalidate_conversations_cache()で明示的に無効化すること。
+    """
+    if "conversations_cache" not in st.session_state:
+        st.session_state["conversations_cache"] = load_conversations(db, session_id)
+    return st.session_state["conversations_cache"]
+
+
+def invalidate_conversations_cache():
+    st.session_state.pop("conversations_cache", None)
+
+
+def get_messages_cached(db, conversation_id: str) -> list:
+    """メッセージ一覧も同様にキャッシュし、チャット切り替え時以外は読み直さない。"""
+    if conversation_id is None:
+        return []
+    cache = st.session_state.setdefault("messages_cache", {})
+    if conversation_id not in cache:
+        cache[conversation_id] = load_conversation_messages(db, conversation_id)
+    return cache[conversation_id]
+
+
+def set_messages_cache(conversation_id: str, messages: list):
+    st.session_state.setdefault("messages_cache", {})[conversation_id] = messages
+
+
+def invalidate_messages_cache(conversation_id: str):
+    st.session_state.get("messages_cache", {}).pop(conversation_id, None)
+
+
 def load_conversations(db, session_id: str) -> list:
     docs = db.collection(CONVERSATIONS_COLLECTION).where(
         "session_id", "==", session_id
@@ -640,8 +673,10 @@ def main():
         session_id = str(uuid.uuid4())
         st.query_params["sid"] = session_id
 
-    _, session_expires_at = ensure_session(db, session_id)
-    conversations = load_conversations(db, session_id)
+    if "session_expires_at" not in st.session_state:
+        _, st.session_state["session_expires_at"] = ensure_session(db, session_id)
+    session_expires_at = st.session_state["session_expires_at"]
+    conversations = get_conversations_cached(db, session_id)
 
     # 現在選択中のチャット：
     # ・まだ何もない場合や「＋新しいチャット」直後は current_conversation_id = None（ドラフト状態）
@@ -694,6 +729,7 @@ def main():
                 with col_save:
                     if st.button("保存", key=f"save_{conv_id}", use_container_width=True):
                         rename_conversation(db, conv_id, new_title)
+                        invalidate_conversations_cache()
                         st.session_state["editing_conversation_id"] = None
                         st.rerun()
                 with col_cancel:
@@ -706,6 +742,8 @@ def main():
                 with col_confirm:
                     if st.button("削除する", key=f"confirmdel_{conv_id}", use_container_width=True):
                         delete_conversation(db, conv_id)
+                        invalidate_conversations_cache()
+                        invalidate_messages_cache(conv_id)
                         if st.session_state["current_conversation_id"] == conv_id:
                             st.session_state["current_conversation_id"] = None
                         st.session_state["deleting_conversation_id"] = None
@@ -744,8 +782,8 @@ def main():
             "Render の環境変数に少なくとも1つ設定してください。"
         )
 
-    # --- これまでの会話を表示（Firestoreから読み込む）---
-    messages = load_conversation_messages(db, current_id) if current_id else []
+    # --- これまでの会話を表示（キャッシュ経由、チャット切り替え時以外はFirestoreを読まない）---
+    messages = get_messages_cached(db, current_id)
     for i, msg in enumerate(messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -801,6 +839,7 @@ def main():
         if is_new_conversation:
             current_id = create_conversation(db, session_id, session_expires_at)
             st.session_state["current_conversation_id"] = current_id
+            invalidate_conversations_cache()
             messages = []
 
         messages.append({"role": "user", "content": user_input})
@@ -994,11 +1033,26 @@ def main():
             assistant_message["custom_dia"] = new_custom_dia
         messages.append(assistant_message)
         save_conversation_messages(db, current_id, messages)
+        # 今回のやり取りはもう手元にあるので、次の再実行でFirestoreを読み直さずに使う
+        set_messages_cache(current_id, messages)
 
         # リネーム指示ではなく、かつ最初のやり取りの場合はユーザーの発言からチャット名を自動でつける
-        if not rename_target and is_new_conversation:
-            auto_title = user_input.strip()[:20] or DEFAULT_TITLE
-            rename_conversation(db, current_id, auto_title)
+        if rename_target or is_new_conversation:
+            if not rename_target and is_new_conversation:
+                auto_title = user_input.strip()[:20] or DEFAULT_TITLE
+                rename_conversation(db, current_id, auto_title)
+            # タイトルが変わった（または一覧に新規チャットが増えた）ので一覧を読み直す
+            invalidate_conversations_cache()
+        else:
+            # 既存チャットへの通常のやり取りは「最終更新時刻」だけが変わるので、
+            # 一覧を読み直さずその場でキャッシュの並び順だけ更新する
+            cached = st.session_state.get("conversations_cache")
+            if cached:
+                for c in cached:
+                    if c["conversation_id"] == current_id:
+                        c["updated_at"] = time.time()
+                        break
+                cached.sort(key=lambda c: c["updated_at"], reverse=True)
 
         st.rerun()
 
