@@ -896,43 +896,30 @@ def main():
                     key=f"oud2_dl_new_{current_id}_{len(messages)}",
                 )
                 oud2_attached = "all"
-            elif dense_request:
+            elif dense_request and not oud2_request:
+                # 過密「ダイヤグラム」の表示だけなら機械生成のままで問題ない。
+                # oud2ファイルが欲しい場合は、会話の内容（区間・時間帯・密度など）を
+                # 踏まえてGeminiに組んでもらう下のelse分岐に流す
+                # （機械生成の終日ダイヤをそのままoud2にするのはやめた）。
                 line_key = parse_line_key(user_input)
                 headway_sec = parse_headway_sec(user_input)
                 headway_min = headway_sec // 60
-                if oud2_request:
-                    reply = (
-                        f"全種別の運転間隔を{headway_min}分に揃えた過密ダイヤを.oud2ファイルとして"
-                        "作成しました。下のボタンからダウンロードして、OuDiaSecondで開いてください。"
-                        "「5分間隔の過密ダイヤ」のように間隔を指定することもできます。"
-                    )
-                    st.markdown(reply)
-                    st.download_button(
-                        "📥 過密ダイヤを.oud2でダウンロード",
-                        data=get_cached_dense_oud2(line_key, headway_sec),
-                        file_name="dense_dia.oud2",
-                        mime="application/octet-stream",
-                        key=f"oud2_dense_dl_new_{current_id}_{len(messages)}",
-                    )
-                    oud2_attached = "dense"
-                    dense_oud2_info = {"line_key": line_key, "headway_sec": headway_sec}
-                else:
-                    hour_start, hour_end = parse_hour_range(user_input)
-                    reply = (
-                        f"全種別の運転間隔を{headway_min}分に揃えた過密ダイヤグラム"
-                        f"（{hour_start}:00〜{hour_end}:00、実線=下り・点線=上り）を作成しました。"
-                        "「5分間隔の過密ダイヤ」のように間隔を、"
-                        "「7時から10時の過密ダイヤ」のように時間帯を指定することもできます。"
-                    )
-                    st.markdown(reply)
-                    fig = get_cached_diagram_figure(line_key, hour_start, hour_end, headway_sec)
-                    st.plotly_chart(
-                        fig, use_container_width=True, key=f"diagram_dense_new_{current_id}_{len(messages)}"
-                    )
-                    diagram_attached = {
-                        "line_key": line_key, "hour_start": hour_start, "hour_end": hour_end,
-                        "headway_sec": headway_sec,
-                    }
+                hour_start, hour_end = parse_hour_range(user_input)
+                reply = (
+                    f"全種別の運転間隔を{headway_min}分に揃えた過密ダイヤグラム"
+                    f"（{hour_start}:00〜{hour_end}:00、実線=下り・点線=上り）を作成しました。"
+                    "「5分間隔の過密ダイヤ」のように間隔を、"
+                    "「7時から10時の過密ダイヤ」のように時間帯を指定することもできます。"
+                )
+                st.markdown(reply)
+                fig = get_cached_diagram_figure(line_key, hour_start, hour_end, headway_sec)
+                st.plotly_chart(
+                    fig, use_container_width=True, key=f"diagram_dense_new_{current_id}_{len(messages)}"
+                )
+                diagram_attached = {
+                    "line_key": line_key, "hour_start": hour_start, "hour_end": hour_end,
+                    "headway_sec": headway_sec,
+                }
             elif oud2_request and find_last_custom_dia(messages[:-1]):
                 custom_dia_for_oud2 = find_last_custom_dia(messages[:-1])
                 try:
@@ -957,23 +944,6 @@ def main():
                         "もう一度言ってください。"
                     )
                     st.markdown(reply)
-            elif oud2_request:
-                reply = (
-                    "尾羽急本線の終日ダイヤを.oud2ファイルとして作成しました。"
-                    "他の路線（千鳥支線・井問線・東阪モノレール・尾羽急高速線・金田線）も"
-                    "まとめて欲しい場合は「全路線をoud2にして」のように言ってください。"
-                    "下のボタンからダウンロードして、OuDiaSecondで開いてください。"
-                )
-                st.markdown(reply)
-                oud2_bytes = get_cached_sample_oud2()
-                st.download_button(
-                    "📥 .oud2ファイルをダウンロード",
-                    data=oud2_bytes,
-                    file_name="obakyu_sample.oud2",
-                    mime="application/octet-stream",
-                    key=f"oud2_dl_new_{current_id}_{len(messages)}",
-                )
-                oud2_attached = "one"
             elif untenkeikaku_request:
                 line_key = parse_line_key(user_input)
                 train_number = parse_train_number(user_input)
@@ -1032,6 +1002,28 @@ def main():
                         # 隠しJSONブロックを取り除いた本文で表示し直す
                         placeholder.empty()
                         st.markdown(reply)
+
+                    # oud2も頼まれていた場合、会話の内容を踏まえて今作られたダイヤを
+                    # そのままoud2ファイルにする（機械生成の終日ダイヤにはフォールバックしない）
+                    if oud2_request:
+                        if new_custom_dia:
+                            try:
+                                oud2_bytes = build_oud2_from_custom_dia(new_custom_dia)
+                                st.download_button(
+                                    "📥 このダイヤを.oud2でダウンロード",
+                                    data=oud2_bytes,
+                                    file_name="custom_dia.oud2",
+                                    mime="application/octet-stream",
+                                    key=f"oud2_fresh_dl_new_{current_id}_{len(messages)}",
+                                )
+                                oud2_attached = "custom"
+                            except Exception as e:
+                                st.caption(f"（このダイヤの.oud2変換に失敗しました: {e}）")
+                        else:
+                            st.caption(
+                                "（具体的な時刻表が作られなかったため、.oud2ファイルは作成できませんでした。"
+                                "停車駅・時刻が分かるダイヤを先にお願いしてから、もう一度試してください）"
+                            )
 
         assistant_message = {"role": "assistant", "content": reply}
         if oud2_attached:
