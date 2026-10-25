@@ -40,6 +40,9 @@ from diagram_export import (
     parse_train_number,
     is_dense_schedule_request,
     parse_headway_sec,
+    build_untenhyou_html,
+    is_untenhyou_request,
+    parse_time_unit,
 )
 
 
@@ -840,6 +843,21 @@ def main():
                     mime="text/html",
                     key=f"uk_dl_{current_id}_{i}",
                 )
+            elif msg.get("untenhyou"):
+                uh = msg["untenhyou"]
+                try:
+                    html_bytes, _, _ = build_untenhyou_html(
+                        uh["custom_dia"], time_unit=uh.get("time_unit", "sec")
+                    )
+                    st.download_button(
+                        "📥 運転表をダウンロード（HTML）",
+                        data=html_bytes,
+                        file_name="untenhyou.html",
+                        mime="text/html",
+                        key=f"untenhyou_dl_{current_id}_{i}",
+                    )
+                except Exception:
+                    pass
             elif msg.get("diagram"):
                 dg = msg["diagram"]
                 fig = get_cached_diagram_figure(dg["line_key"], dg["hour_start"], dg["hour_end"])
@@ -867,12 +885,15 @@ def main():
             w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")
         )
         untenkeikaku_request = is_untenkeikaku_request(user_input)
+        untenhyou_request = is_untenhyou_request(user_input)
         diagram_request = is_diagram_request(user_input)
         dense_request = is_dense_schedule_request(user_input)
+        time_unit = parse_time_unit(user_input)
         oud2_attached = None  # None / "one" / "all" / "custom" / "dense"
         custom_dia_for_oud2 = None
         dense_oud2_info = None
         untenkeikaku_attached = None
+        untenhyou_attached = None
         diagram_attached = None
         new_custom_dia = None
 
@@ -942,6 +963,35 @@ def main():
                         f"直前のダイヤを.oud2に変換できませんでした（{e}）。"
                         "代わりに尾羽急本線の終日ダイヤを作成しますか？よければ「oud2にして」と"
                         "もう一度言ってください。"
+                    )
+                    st.markdown(reply)
+            elif untenhyou_request and find_last_custom_dia(messages[:-1]):
+                custom_dia_for_untenhyou = find_last_custom_dia(messages[:-1])
+                try:
+                    html_bytes, n_formations, n_trains = build_untenhyou_html(
+                        custom_dia_for_untenhyou, time_unit=time_unit
+                    )
+                    reply = (
+                        f"直前にお願いいただいたダイヤから、運転表（列車{n_trains}本・推定{n_formations}編成）"
+                        "を1つのファイルにまとめました。下のボタンからダウンロードしてください。"
+                        "印刷すると列車ごとに改ページされます。駅間の到着・発車の情報から、"
+                        "到着駅と発車駅が一致し折り返し時間が確保できる列車どうしを同じ編成として"
+                        "自動的につなげていますが、実際の車両運用（検車・留置線の都合など）とは"
+                        "一致しない場合があります。"
+                    )
+                    st.markdown(reply)
+                    st.download_button(
+                        "📥 運転表をダウンロード（HTML）",
+                        data=html_bytes,
+                        file_name="untenhyou.html",
+                        mime="text/html",
+                        key=f"untenhyou_dl_new_{current_id}_{len(messages)}",
+                    )
+                    untenhyou_attached = custom_dia_for_untenhyou
+                except Exception as e:
+                    reply = (
+                        f"直前のダイヤから運転表を作成できませんでした（{e}）。"
+                        "停車駅・時刻が分かるダイヤを先にお願いしてから、もう一度試してください。"
                     )
                     st.markdown(reply)
             elif untenkeikaku_request:
@@ -1025,6 +1075,29 @@ def main():
                                 "停車駅・時刻が分かるダイヤを先にお願いしてから、もう一度試してください）"
                             )
 
+                    # 運転表も頼まれていた場合、同様に今作られたダイヤからその場で生成する
+                    if untenhyou_request:
+                        if new_custom_dia:
+                            try:
+                                html_bytes, n_formations, n_trains = build_untenhyou_html(
+                                    new_custom_dia, time_unit=time_unit
+                                )
+                                st.download_button(
+                                    "📥 運転表をダウンロード（HTML）",
+                                    data=html_bytes,
+                                    file_name="untenhyou.html",
+                                    mime="text/html",
+                                    key=f"untenhyou_fresh_dl_new_{current_id}_{len(messages)}",
+                                )
+                                untenhyou_attached = new_custom_dia
+                            except Exception as e:
+                                st.caption(f"（運転表の作成に失敗しました: {e}）")
+                        else:
+                            st.caption(
+                                "（具体的な時刻表が作られなかったため、運転表は作成できませんでした。"
+                                "停車駅・時刻が分かるダイヤを先にお願いしてから、もう一度試してください）"
+                            )
+
         assistant_message = {"role": "assistant", "content": reply}
         if oud2_attached:
             assistant_message["oud2"] = oud2_attached
@@ -1034,6 +1107,8 @@ def main():
                 assistant_message["dense_oud2"] = dense_oud2_info
         if untenkeikaku_attached:
             assistant_message["untenkeikaku"] = untenkeikaku_attached
+        if untenhyou_attached:
+            assistant_message["untenhyou"] = {"custom_dia": untenhyou_attached, "time_unit": time_unit}
         if diagram_attached:
             assistant_message["diagram"] = diagram_attached
         if new_custom_dia:
