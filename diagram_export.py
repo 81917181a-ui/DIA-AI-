@@ -16,7 +16,7 @@ import re
 
 import plotly.graph_objects as go
 
-from oud2_export import LINE_DEFS, build_full_day_trains
+from oud2_export import LINE_DEFS, build_full_day_trains, _match_station_indices, _parse_time_to_sec
 
 
 def _find_line(line_key: str) -> dict:
@@ -255,3 +255,183 @@ def build_diagram_figure(
     fig.update_xaxes(showgrid=True, gridcolor="#ddd")
     fig.update_yaxes(showgrid=True, gridcolor="#ddd")
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 運転表（スタフ）
+# ---------------------------------------------------------------------------
+def is_untenhyou_request(text: str) -> bool:
+    """「運転表にして」「スタフ作って」のような指示かどうかを判定する。"""
+    return ("運転表" in text) or ("スタフ" in text)
+
+
+def parse_time_unit(text: str, default: str = "sec") -> str:
+    """「分単位」「秒単位」の指定があれば読み取る。なければdefault（秒単位）。"""
+    if "秒単位" in text:
+        return "sec"
+    if "分単位" in text:
+        return "min"
+    return default
+
+
+def _format_untenhyou_time(value, unit: str) -> str:
+    sec = _parse_time_to_sec(value) if isinstance(value, str) else value
+    if sec is None:
+        return ""
+    sec = int(round(sec))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if unit == "min":
+        return f"{h}:{m:02d}"
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def _resolve_train_rows(line_def: dict, train: dict, direction: str, indices: list):
+    """
+    DIA_JSONの停車駅（通過駅は含まれない）から、経路の始点〜終点まで全駅ぶんの行
+    （駅名, 到着時刻文字列またはNone, 発車時刻文字列またはNone, 備考）を組み立てる。
+    通過駅は時刻なし・備考「通過」で埋める。
+    """
+    stations = line_def["stations"]
+    name_time = {idx: train["stops"][pos] for pos, idx in enumerate(indices)}
+    lo, hi = min(indices), max(indices)
+    order = range(lo, hi + 1) if direction == "Kudari" else range(hi, lo - 1, -1)
+
+    rows = []
+    for idx in order:
+        name = stations[idx]["name"]
+        if idx in name_time:
+            stop = name_time[idx]
+            rows.append((name, stop.get("arrival"), stop.get("departure"), ""))
+        else:
+            rows.append((name, None, None, "通過"))
+    return rows
+
+
+def _assign_formations(infos: list, min_turnback_sec: int = 180):
+    """
+    到着駅＝次の列車の発車駅、かつ折り返しに最低min_turnback_sec秒あることを条件に、
+    列車どうしを同じ「編成」としてつなげる（貪欲法による簡易的な推定）。
+    """
+    infos_sorted = sorted(infos, key=lambda x: x["origin_time"] if x["origin_time"] is not None else 0)
+
+    formations = []  # [[info, info, ...], ...]
+    available = []   # [(station_idx, avail_time, formation_index), ...]
+
+    for info in infos_sorted:
+        best_i, best_avail = None, None
+        if info["origin_time"] is not None:
+            for i, (st_idx, avail_time, f_idx) in enumerate(available):
+                if st_idx != info["origin_idx"] or avail_time is None:
+                    continue
+                if avail_time + min_turnback_sec <= info["origin_time"]:
+                    if best_avail is None or avail_time > best_avail:
+                        best_avail, best_i = avail_time, i
+
+        if best_i is not None:
+            _, _, f_idx = available[best_i]
+            formations[f_idx].append(info)
+            available[best_i] = (info["terminus_idx"], info["terminus_time"], f_idx)
+        else:
+            f_idx = len(formations)
+            formations.append([info])
+            available.append((info["terminus_idx"], info["terminus_time"], f_idx))
+
+    return formations
+
+
+def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_sec: int = 180):
+    """
+    チャットで実際に作られたダイヤ（DIA_JSON）から、編成（運用）単位でつなげた
+    運転表（スタフ）のHTMLを1ファイルで生成する。画面には「列車番号・種別・行き先」の
+    ヘッダーと、「駅名・着時刻・発時刻・通過待ち等」の表を列車ごとに並べ、印刷時に
+    1列車＝1ページで改ページされるようにしている（番線の列は含めない）。
+
+    戻り値: (HTML文字列をUTF-8エンコードしたbytes, 編成数, 列車数)
+    """
+    line_key = custom_dia.get("line_key")
+    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
+    if line_def is None:
+        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+
+    infos = []
+    for train in custom_dia.get("trains", []):
+        direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
+        stops = train.get("stops") or []
+        if not stops:
+            continue
+        try:
+            indices = _match_station_indices(line_def["stations"], train, direction)
+        except ValueError:
+            continue
+
+        rows = _resolve_train_rows(line_def, train, direction, indices)
+        origin_time = _parse_time_to_sec(stops[0].get("departure") or stops[0].get("arrival"))
+        terminus_time = _parse_time_to_sec(stops[-1].get("arrival") or stops[-1].get("departure"))
+
+        infos.append(
+            {
+                "train_number": str(train.get("train_number") or ""),
+                "service": train.get("service", ""),
+                "destination": rows[-1][0],
+                "rows": rows,
+                "origin_idx": indices[0],
+                "origin_time": origin_time,
+                "terminus_idx": indices[-1],
+                "terminus_time": terminus_time,
+            }
+        )
+
+    formations = _assign_formations(infos, min_turnback_sec=min_turnback_sec)
+
+    sheets = []
+    for f_idx, trains_in_formation in enumerate(formations, start=1):
+        for duty_idx, info in enumerate(trains_in_formation, start=1):
+            rows_html = "\n".join(
+                f'<tr><td class="station">{name}</td>'
+                f'<td class="time">{_format_untenhyou_time(arr, time_unit)}</td>'
+                f'<td class="time">{_format_untenhyou_time(dep, time_unit)}</td>'
+                f'<td class="note">{note}</td></tr>'
+                for name, arr, dep, note in info["rows"]
+            )
+            sheets.append(f"""<section class="sheet">
+  <div class="formation-label">編成{f_idx} - 第{duty_idx}運用</div>
+  <table class="headertable">
+    <tr><th>列車番号</th><th>種別</th><th>行き先</th></tr>
+    <tr><td class="big">{info['train_number']}</td><td class="big">{info['service']}</td><td class="big">{info['destination']}</td></tr>
+  </table>
+  <table class="maintable">
+    <tr><th>駅名</th><th>着時刻</th><th>発時刻</th><th>通過待ち等</th></tr>
+    {rows_html}
+  </table>
+</section>""")
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>運転表</title>
+<style>
+  body {{ font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif; margin: 0; color: #111; }}
+  .sheet {{
+    page-break-after: always; break-after: page;
+    padding: 24px; box-sizing: border-box;
+  }}
+  .sheet:last-child {{ page-break-after: auto; break-after: auto; }}
+  .formation-label {{ font-size: 14px; color: #555; margin-bottom: 6px; }}
+  table {{ border-collapse: collapse; width: 100%; margin-bottom: 10px; }}
+  th, td {{ border: 1px solid #000; padding: 6px 8px; text-align: center; }}
+  th {{ background: #eee; }}
+  .headertable .big {{ font-size: 22px; font-weight: bold; padding: 10px; }}
+  .maintable td.station {{ text-align: left; font-weight: bold; white-space: nowrap; }}
+  .maintable td.time {{ font-variant-numeric: tabular-nums; }}
+  @media print {{
+    .sheet {{ padding: 12mm; }}
+  }}
+</style>
+</head>
+<body>
+{''.join(sheets)}
+</body>
+</html>"""
+    return html.encode("utf-8"), len(formations), len(infos)
