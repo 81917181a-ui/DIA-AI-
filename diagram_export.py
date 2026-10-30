@@ -16,7 +16,13 @@ import re
 
 import plotly.graph_objects as go
 
-from oud2_export import LINE_DEFS, build_full_day_trains, _match_station_indices, _parse_time_to_sec
+from oud2_export import (
+    LINE_DEFS,
+    build_full_day_trains,
+    _match_station_indices,
+    _parse_time_to_sec,
+    expand_generate_spec,
+)
 
 
 def _find_line(line_key: str) -> dict:
@@ -308,6 +314,62 @@ def _resolve_train_rows(line_def: dict, train: dict, direction: str, indices: li
     return rows
 
 
+def _rows_from_internal_train(line_def: dict, train: dict, direction: str):
+    """
+    build_full_day_trains（内部形式、秒数ベース）で作られた列車1本から、
+    運転表の行（駅名, 着時刻sec, 発時刻sec, 備考）を組み立てる。
+    通過駅も含めて、経路上の全駅ぶんの行を返す。
+    """
+    stations = line_def["stations"]
+    n = len(stations)
+    order = range(n) if direction == "Kudari" else range(n - 1, -1, -1)
+
+    rows = []
+    for idx in order:
+        if idx not in train["stops"]:
+            continue
+        arr, dep = train["stops"][idx]
+        name = stations[idx]["name"]
+        if arr is None and dep is None:
+            rows.append((name, None, None, "通過"))
+        else:
+            rows.append((name, arr, dep, ""))
+    return rows
+
+
+def _infos_from_internal_trains(line_def: dict, kudari_trains: list, nobori_trains: list):
+    """generate展開後の内部形式の列車一覧から、編成割り当て用のinfosリストを作る。"""
+    infos = []
+    for direction, trains in (("Kudari", kudari_trains), ("Nobori", nobori_trains)):
+        for train in trains:
+            rows = _rows_from_internal_train(line_def, train, direction)
+            stop_rows = [r for r in rows if r[3] != "通過"]
+            if not stop_rows:
+                continue
+            origin_idx = next(idx for idx in train["stops"] if train["stops"][idx] != (None, None))
+            # 上の1行はdictの走査順に依存するため、実際の始点・終点は行の並び(rows)から取り直す
+            origin_name, origin_arr, origin_dep, _ = stop_rows[0]
+            terminus_name, terminus_arr, terminus_dep, _ = stop_rows[-1]
+
+            n = len(line_def["stations"])
+            order = list(range(n)) if direction == "Kudari" else list(range(n - 1, -1, -1))
+            stop_indices = [idx for idx in order if idx in train["stops"] and train["stops"][idx] != (None, None)]
+
+            infos.append(
+                {
+                    "train_number": str(train.get("train_number") or ""),
+                    "service": line_def["service_types"][train["service_index"]],
+                    "destination": terminus_name,
+                    "rows": rows,
+                    "origin_idx": stop_indices[0],
+                    "origin_time": origin_dep if origin_dep is not None else origin_arr,
+                    "terminus_idx": stop_indices[-1],
+                    "terminus_time": terminus_arr if terminus_arr is not None else terminus_dep,
+                }
+            )
+    return infos
+
+
 def _assign_formations(infos: list, min_turnback_sec: int = 180):
     """
     到着駅＝次の列車の発車駅、かつ折り返しに最低min_turnback_sec秒あることを条件に、
@@ -354,6 +416,12 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
     if line_def is None:
         raise ValueError(f"路線キー「{line_key}」が見つかりません。")
 
+    if custom_dia.get("generate"):
+        kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
+        infos = _infos_from_internal_trains(line_def, kudari_trains, nobori_trains)
+        formations = _assign_formations(infos, min_turnback_sec=min_turnback_sec)
+        return _render_untenhyou_html(formations, time_unit), len(formations), len(infos)
+
     infos = []
     for train in custom_dia.get("trains", []):
         direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
@@ -383,7 +451,11 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
         )
 
     formations = _assign_formations(infos, min_turnback_sec=min_turnback_sec)
+    return _render_untenhyou_html(formations, time_unit), len(formations), len(infos)
 
+
+def _render_untenhyou_html(formations: list, time_unit: str = "sec") -> bytes:
+    """編成ごとにグループ化されたinfosのリストから、運転表の最終的なHTML(bytes)を組み立てる。"""
     sheets = []
     for f_idx, trains_in_formation in enumerate(formations, start=1):
         for duty_idx, info in enumerate(trains_in_formation, start=1):
@@ -434,4 +506,4 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
 {''.join(sheets)}
 </body>
 </html>"""
-    return html.encode("utf-8"), len(formations), len(infos)
+    return html.encode("utf-8")
