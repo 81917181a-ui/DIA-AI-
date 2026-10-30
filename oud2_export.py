@@ -670,10 +670,41 @@ def _parse_time_to_sec(value):
     return int(h) * 3600 + int(m) * 60 + int(s)
 
 
+def expand_generate_spec(generate_spec: dict, line_def: dict):
+    """
+    "generate"仕様（start_hour/end_hour/headway_min/dwell_sec）から、build_full_day_trainsを
+    使って実際の列車一覧を機械的に生成する。Geminiに全列車を手で書かせる代わりに、
+    「条件」だけをJSONで渡してもらい、本数が多いダイヤもこちら側で確実に生成するための仕組み。
+    戻り値: (kudari_trains, nobori_trains)（いずれも内部形式のリスト）
+    """
+    start_sec = int(float(generate_spec.get("start_hour", 6)) * 3600)
+    end_sec = int(float(generate_spec.get("end_hour", 24)) * 3600)
+    dwell_sec = int(generate_spec.get("dwell_sec", DEFAULT_DWELL_SEC))
+
+    headway_min = generate_spec.get("headway_min") or {}
+    headways = {name: int(round(float(mins) * 60)) for name, mins in headway_min.items()} or None
+
+    return build_full_day_trains(
+        stations=line_def["stations"],
+        run_times_sec=line_def["run_times_sec"],
+        service_types=line_def["service_types"],
+        express_times=line_def.get("express_times"),
+        start_sec=start_sec,
+        end_sec=end_sec,
+        dwell_sec=dwell_sec,
+        headways=headways,
+        one_way=line_def.get("one_way", False),
+    )
+
+
 def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
     """
     チャットでユーザーが実際に依頼して作られたダイヤ（Geminiが出力したDIA_JSON）から
     .oud2ファイルを組み立てる。LINE_DEFSに定義済みの路線のみ対応。
+
+    custom_diaが"generate"（始発・終電・運転間隔などの条件）を持つ場合は、
+    build_full_day_trainsで機械的に大量の列車を展開する。
+    "trains"（個別の列車リスト）を持つ場合は、その内容をそのまま使う。
     """
     line_key = custom_dia.get("line_key")
     line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
@@ -683,29 +714,34 @@ def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
     stations = line_def["stations"]
     service_types = line_def["service_types"]
 
-    kudari_trains = []
-    nobori_trains = []
+    if custom_dia.get("generate"):
+        kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
+    else:
+        kudari_trains = []
+        nobori_trains = []
 
-    for train in custom_dia.get("trains", []):
-        direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
-        service_name = train.get("service")
-        service_index = service_types.index(service_name) if service_name in service_types else 0
+        for train in custom_dia.get("trains", []):
+            direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
+            service_name = train.get("service")
+            service_index = service_types.index(service_name) if service_name in service_types else 0
 
-        indices = _match_station_indices(stations, train, direction)
-        if not indices:
-            continue
+            indices = _match_station_indices(stations, train, direction)
+            if not indices:
+                continue
 
-        stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
-        for pos, idx in enumerate(indices):
-            stop = train["stops"][pos]
-            stops[idx] = (_parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure")))
+            stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
+            for pos, idx in enumerate(indices):
+                stop = train["stops"][pos]
+                stops[idx] = (
+                    _parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure"))
+                )
 
-        entry = {
-            "service_index": service_index,
-            "train_number": str(train.get("train_number") or ""),
-            "stops": stops,
-        }
-        (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
+            entry = {
+                "service_index": service_index,
+                "train_number": str(train.get("train_number") or ""),
+                "stops": stops,
+            }
+            (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
 
     dia_name = custom_dia.get("dia_name") or "お願いしたダイヤ"
     text = build_oud2_file(
