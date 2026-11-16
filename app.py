@@ -160,6 +160,11 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
     最後の到着だけ末尾の行に書くこと（stopsの駅名は重複したままでよい。並び順で判別される）。
     1本の列車がrouteの末尾（出発駅に戻った地点）より先まで走る場合は、末尾で列車を分けること
     （1つの.oud2は駅が一直線に並ぶ形式のため、1周以上続けて走る1本の列車は表せない）。
+  - 井問線と尾羽急本線は、井口から安越方面（尾羽原と反対側）にしかつながっていない。
+    井問線から尾羽原へ直通するrouteは作れない（井問線の次に、尾羽原を含む本線の区間をつなげてはならない）。
+    環状にするときは「井口→（安越方面）→千鳥→（尾羽急高速線）問屋町→（井問線）本郷→…→井口」の向きで
+    routeを組み、井口に戻ったらまた安越方面へ進む。尾羽原へ行く列車は、井口〜尾羽原の支線として
+    別の列車（line_keyのみのダイヤ）で、15〜20分間隔などで運転すること。
   - stopsの駅名は、routeでつなげた経路の駅名と完全に一致させること。
   - 直通でない通常のダイヤでは、これまでどおり "line_key" のみを書く（"route"は書かない）。
   - 直通ダイヤのstopsには、上り（Nobori）の場合も駅を進行方向の順に並べること。
@@ -861,14 +866,18 @@ def main():
                 )
             elif msg.get("oud2") == "custom":
                 cd = msg["custom_dia"]
-                oud2_bytes = build_oud2_from_custom_dia(cd)
-                st.download_button(
-                    "📥 このダイヤを.oud2でダウンロード",
-                    data=oud2_bytes,
-                    file_name="custom_dia.oud2",
-                    mime="application/octet-stream",
-                    key=f"oud2_custom_dl_{current_id}_{i}",
-                )
+                try:
+                    oud2_bytes = build_oud2_from_custom_dia(cd)
+                    st.download_button(
+                        "📥 このダイヤを.oud2でダウンロード",
+                        data=oud2_bytes,
+                        file_name="custom_dia.oud2",
+                        mime="application/octet-stream",
+                        key=f"oud2_custom_dl_{current_id}_{i}",
+                    )
+                except Exception as e:
+                    # 路線データの変更などで過去のダイヤが作れなくなっても、チャット画面全体は落とさない
+                    st.caption(f"（このダイヤの.oud2は現在のデータでは作成できません: {e}）")
             elif msg.get("oud2"):
                 st.download_button(
                     "📥 .oud2ファイルをダウンロード",
