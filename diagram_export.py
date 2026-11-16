@@ -22,6 +22,7 @@ from oud2_export import (
     _match_station_indices,
     _parse_time_to_sec,
     expand_generate_spec,
+    resolve_line_def,
 )
 
 
@@ -411,10 +412,8 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
 
     戻り値: (HTML文字列をUTF-8エンコードしたbytes, 編成数, 列車数)
     """
-    line_key = custom_dia.get("line_key")
-    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
-    if line_def is None:
-        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+    # 複数路線の直通ダイヤ（"route"あり）にも対応する
+    line_def = resolve_line_def(custom_dia)
 
     if custom_dia.get("generate"):
         kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
