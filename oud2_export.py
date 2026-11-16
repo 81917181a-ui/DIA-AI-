@@ -105,6 +105,8 @@ from stations_data import (
     NIJINOHARA_BRT1_2_RUN_TIMES_SEC,
     NIJINOHARA_BRT1_4_STATIONS,
     NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
+    THROUGH_SERVICE_ORDER,
+    THROUGH_SERVICE_ALIASES,
 )
 
 CRLF = "\r\n"
@@ -568,6 +570,170 @@ LINE_DEFS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# 直通運転（複数路線をまたぐダイヤ）
+# ---------------------------------------------------------------------------
+THROUGH_LINE_KEY = "through"
+
+
+def _find_line_def(line_key: str):
+    return next((d for d in LINE_DEFS if d["key"] == line_key), None)
+
+
+def _line_service_for(unified: str, line_key: str):
+    """
+    統一種別名（各停・準急・快速・急行・快速急行）を、その路線での実際の種別名に直す。
+    その路線に該当種別がなければ、より下位の種別、それも無ければ最下位の種別を使う。
+    """
+    if unified not in THROUGH_SERVICE_ORDER:
+        return None
+    pos = THROUGH_SERVICE_ORDER.index(unified)
+    for name in reversed(THROUGH_SERVICE_ORDER[: pos + 1]):
+        mapped = THROUGH_SERVICE_ALIASES.get(name, {}).get(line_key)
+        if mapped:
+            return mapped
+    for name in THROUGH_SERVICE_ORDER:
+        mapped = THROUGH_SERVICE_ALIASES.get(name, {}).get(line_key)
+        if mapped:
+            return mapped
+    return None
+
+
+def _unified_stops(station: dict, line_key: str) -> list:
+    """その路線の駅データの停車種別を、統一種別名のリストに直す。"""
+    stops = station.get("stops") or []
+    return [u for u in THROUGH_SERVICE_ORDER if _line_service_for(u, line_key) in stops]
+
+
+def normalize_service_name(name: str, service_types: list):
+    """
+    列車の種別名が、その路線の種別一覧に無い場合（例: 直通ダイヤで「普通」と書かれた）に、
+    対応表から統一種別名を探して返す。見つからなければNone。
+    """
+    if name in service_types:
+        return name
+    for unified, mapping in THROUGH_SERVICE_ALIASES.items():
+        if name in mapping.values() and unified in service_types:
+            return unified
+    return None
+
+
+def build_through_line_def(route: list) -> dict:
+    """
+    複数路線を接続駅でつなげた「直通路線」を、LINE_DEFSの1要素と同じ形で組み立てる。
+
+    route: [{"line_key": "obakyu_main", "from": "尾羽原", "to": "千鳥"},
+            {"line_key": "rapid_line", "from": "千鳥", "to": "問屋町"},
+            {"line_key": "itoi_line", "from": "問屋町", "to": "井口"}, ...]
+      - 前の区間の「to」と次の区間の「from」は同じ駅（接続駅）にする。
+      - from > to の順（その路線を逆向きに走る）も指定できる。
+      - 同じ駅名が経路に2回出てくる場合（環状に1周して戻る等）は、別々の行として残す。
+        停車時刻を割り当てるときは、経路の先に書いた方の行が優先される。
+      - 接続駅の停車種別は、つなぐ両路線の和集合にする。
+    """
+    if not route:
+        raise ValueError("route（路線の並び）が空です。")
+
+    stations = []
+    run_times = []
+    express = {}
+    line_names = []
+
+    prev_to = None
+    for n, seg in enumerate(route, 1):
+        line_key = seg.get("line_key")
+        line_def = _find_line_def(line_key)
+        if line_def is None:
+            raise ValueError(f"route {n}番目: 路線キー「{line_key}」が見つかりません。")
+        if not any(line_key in m for m in THROUGH_SERVICE_ALIASES.values()):
+            raise ValueError(f"route {n}番目: 路線「{line_def['line_name']}」は直通ダイヤに対応していません。")
+
+        names = [st["name"] for st in line_def["stations"]]
+        frm = seg.get("from") or prev_to or names[0]
+        to = seg.get("to") or (names[-1] if names.index(frm) == 0 else names[0])
+        for label, nm in (("from", frm), ("to", to)):
+            if nm not in names:
+                raise ValueError(
+                    f"route {n}番目: 駅「{nm}」は{line_def['line_name']}にありません（{label}）。"
+                )
+        if prev_to is not None and frm != prev_to:
+            raise ValueError(
+                f"route {n}番目: 前の区間の終点「{prev_to}」と、この区間の始点「{frm}」が一致しません。"
+            )
+
+        i, j = names.index(frm), names.index(to)
+        if i == j:
+            raise ValueError(f"route {n}番目: 始点と終点が同じ駅「{frm}」です。")
+        forward = i < j
+        idxs = list(range(i, j + 1)) if forward else list(range(i, j - 1, -1))
+        times = (list(line_def["run_times_sec"][i:j]) if forward
+                 else list(reversed(line_def["run_times_sec"][j:i])))
+
+        seg_stations = []
+        for k in idxs:
+            st = line_def["stations"][k]
+            seg_stations.append(
+                {
+                    "name": st["name"],
+                    "facilities": st.get("facilities", ""),
+                    "stops": _unified_stops(st, line_key),
+                    "notes": st.get("notes", ""),
+                }
+            )
+
+        if stations:
+            # 接続駅: 停車種別は両路線の和集合。設備情報は先に書いた路線のものを使う。
+            junction = stations[-1]
+            junction["stops"] = [u for u in THROUGH_SERVICE_ORDER
+                                 if u in junction["stops"] or u in seg_stations[0]["stops"]]
+            seg_stations = seg_stations[1:]
+        stations.extend(seg_stations)
+        run_times.extend(times)
+
+        # 区間の途中を通過する種別用の直行所要時分（両向きに登録する）
+        seg_names = {st["name"] for st in line_def["stations"][min(i, j): max(i, j) + 1]}
+        for key, sec in (line_def.get("express_times") or {}).items():
+            service, a, b = key
+            if a not in seg_names or b not in seg_names:
+                continue
+            for unified in THROUGH_SERVICE_ORDER:
+                if _line_service_for(unified, line_key) == service:
+                    express[(unified, a, b)] = sec
+                    express[(unified, b, a)] = sec
+
+        line_names.append(line_def["line_name"])
+        prev_to = to
+
+    service_types = [u for u in THROUGH_SERVICE_ORDER if any(u in st["stops"] for st in stations)]
+    return {
+        "key": THROUGH_LINE_KEY,
+        "line_name": f"{stations[0]['name']}〜{stations[-1]['name']}（{'・'.join(dict.fromkeys(line_names))}直通）",
+        "dia_name": "AI生成 直通ダイヤ",
+        "stations": stations,
+        "service_types": service_types,
+        "run_times_sec": run_times,
+        "express_times": express,
+    }
+
+
+def resolve_line_def(custom_dia: dict) -> dict:
+    """
+    チャットで作られたダイヤ（DIA_JSON）が対象とする路線の定義を返す。
+    "route"（路線の並び）があれば複数路線を直通でつなげた路線、なければ"line_key"の路線。
+    """
+    route = custom_dia.get("route")
+    if route:
+        return build_through_line_def(route)
+    line_key = custom_dia.get("line_key")
+    line_def = _find_line_def(line_key)
+    if line_def is None:
+        raise ValueError(
+            f"路線キー「{line_key}」が見つかりません。"
+            "複数路線をまたぐ場合は\"route\"を指定してください。"
+        )
+    return line_def
+
+
 def build_oud2_for_line(line_def: dict, headway_sec: int = None) -> bytes:
     """
     LINE_DEFSの1路線ぶんの定義から、終日ダイヤの.oud2ファイルをバイト列で返す。
@@ -706,10 +872,7 @@ def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
     build_full_day_trainsで機械的に大量の列車を展開する。
     "trains"（個別の列車リスト）を持つ場合は、その内容をそのまま使う。
     """
-    line_key = custom_dia.get("line_key")
-    line_def = next((d for d in LINE_DEFS if d["key"] == line_key), None)
-    if line_def is None:
-        raise ValueError(f"路線キー「{line_key}」が見つかりません。")
+    line_def = resolve_line_def(custom_dia)
 
     stations = line_def["stations"]
     service_types = line_def["service_types"]
@@ -722,7 +885,7 @@ def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
 
         for train in custom_dia.get("trains", []):
             direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
-            service_name = train.get("service")
+            service_name = normalize_service_name(train.get("service"), service_types)
             service_index = service_types.index(service_name) if service_name in service_types else 0
 
             indices = _match_station_indices(stations, train, direction)
