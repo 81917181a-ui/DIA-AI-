@@ -107,6 +107,7 @@ from stations_data import (
     NIJINOHARA_BRT1_4_RUN_TIMES_SEC,
     THROUGH_SERVICE_ORDER,
     THROUGH_SERVICE_ALIASES,
+    service_color,
 )
 
 CRLF = "\r\n"
@@ -158,15 +159,23 @@ def _append_eki_blocks(lines: list, stations: list):
         lines.append(".")
 
 
+def _oudia_color(rgb_hex: str) -> str:
+    """#RRGGBB を OuDiaSecond の色表記（00BBGGRR）に変換する。"""
+    h = rgb_hex.lstrip("#")
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"00{b}{g}{r}".upper()
+
+
 def _append_ressyasyubetsu_blocks(lines: list, service_types: list):
     for i, name in enumerate(service_types):
+        color = _oudia_color(service_color(name, i))
         lines.append("Ressyasyubetsu.")
         lines.append(f"Syubetsumei={name}")
         lines.append(f"Ryakusyou={name[:2]}")
-        lines.append("JikokuhyouMojiColor=00000000")
+        lines.append(f"JikokuhyouMojiColor={color}")
         lines.append("JikokuhyouFontIndex=0")
         lines.append("JikokuhyouBackColor=00FFFFFF")
-        lines.append(f"DiagramSenColor={_SERVICE_COLORS[i % len(_SERVICE_COLORS)]}")
+        lines.append(f"DiagramSenColor={color}")
         lines.append("DiagramSenStyle=SenStyle_Jissen")
         lines.append("StopMarkDrawType=EStopMarkDrawType_DrawOnStop")
         lines.append(".")
