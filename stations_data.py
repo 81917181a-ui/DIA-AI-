@@ -544,6 +544,28 @@ NIJINOHARA_BRT1_4_NOTES = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 直通運転（複数路線をまたぐダイヤ）用データ
+# ---------------------------------------------------------------------------
+# 路線ごとに種別名が違う（本線の「各停」＝井問線の「普通」など）ため、直通ダイヤでは
+# 下の「統一種別名」で種別を指定する。値は {路線キー: その路線での種別名}。
+THROUGH_SERVICE_ORDER = ["各停", "準急", "快速", "急行", "快速急行"]  # 下位→上位の順
+THROUGH_SERVICE_ALIASES = {
+    "各停": {"obakyu_main": "各停", "rapid_line": "各停", "kanada_line": "各停",
+             "itoi_line": "普通", "chidori_branch": "普通"},
+    "準急": {"obakyu_main": "準急", "itoi_line": "快速"},
+    "快速": {"obakyu_main": "快速", "itoi_line": "快速"},
+    "急行": {"obakyu_main": "急行", "rapid_line": "急行", "kanada_line": "急行", "itoi_line": "急行"},
+    "快速急行": {"obakyu_main": "快速急行", "rapid_line": "快速急行", "kanada_line": "快速急行",
+                 "itoi_line": "急行"},
+}
+# 直通ダイヤに使える路線（上の対応表に載っている路線）と、路線どうしの接続駅
+THROUGH_JUNCTIONS_TEXT = (
+    "井口（尾羽急本線×井問線）、千鳥（尾羽急本線×尾羽急高速線×井問線×千鳥支線）、"
+    "問屋町（尾羽急高速線×井問線）、本郷（井問線×千鳥支線）、金田（尾羽急高速線×金田線）"
+)
+
+
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
     lines = ["# 尾羽急本線 路線データ", ""]
@@ -734,5 +756,21 @@ def build_line_context_text() -> str:
             a = route_stations[i]["name"]
             b = route_stations[i + 1]["name"]
             lines.append(f"- {a} - {b}: {route_times[i]}秒")
+
+    # --- 直通運転 ---
+    lines.append("")
+    lines.append("# 直通運転（複数路線をまたぐダイヤ）の扱い")
+    lines.append(
+        "尾羽急本線・尾羽急高速線・井問線・千鳥支線・金田線は、接続駅でつなげて1本の路線として"
+        "ダイヤを作れる（環状のようにつなげてもよい）。つなげられる接続駅: "
+        + THROUGH_JUNCTIONS_TEXT + "。"
+    )
+    lines.append("直通ダイヤでは種別を次の統一種別名で指定する（括弧内がその路線での実際の種別名）。")
+    for unified in THROUGH_SERVICE_ORDER:
+        mapping = THROUGH_SERVICE_ALIASES[unified]
+        lines.append(f"- {unified}: " + "、".join(f"{k}（{v}）" for k, v in mapping.items()))
+    lines.append(
+        "ある路線に該当する種別がない場合は、その路線ではより下位の種別（なければ各停）の停車駅で運転する。"
+    )
 
     return "\n".join(lines)
