@@ -761,6 +761,26 @@ def normalize_service_name(name: str, service_types: list):
     return None
 
 
+def _check_junction_rules(prev: dict, cur: dict):
+    """
+    路線どうしの接続で、物理的につながっていない乗り換えを弾く。
+    ・井口では、井問線と尾羽急本線は「井口から安越方面」にしかつながっていない。
+      井問線から（へ）尾羽原方面へは直通できない。
+    prev/cur: {"line_key", "from", "to"}（prevのtoとcurのfromが接続駅）
+    """
+    junction = prev["to"]
+    if junction == "井口" and {prev["line_key"], cur["line_key"]} == {"itoi_line", "obakyu_main"}:
+        main = prev if prev["line_key"] == "obakyu_main" else cur
+        other_end = main["from"] if main is prev else main["to"]
+        main_names = [st["name"] for st in STATIONS]
+        if main_names.index(other_end) < main_names.index("井口"):
+            raise ValueError(
+                "井問線と尾羽急本線は、井口から安越方面（尾羽原と反対側）にしかつながっていないため、"
+                f"井問線から尾羽原方面（{other_end}）へは直通できません。"
+                "井口から先は安越方面へ進む形にしてください（尾羽原は井口〜尾羽原の支線の列車で運転します）。"
+            )
+
+
 def build_through_line_def(route: list) -> dict:
     """
     複数路線を接続駅でつなげた「直通路線」を、LINE_DEFSの1要素と同じ形で組み立てる。
@@ -783,6 +803,7 @@ def build_through_line_def(route: list) -> dict:
     line_names = []
 
     prev_to = None
+    prev_seg = None
     for n, seg in enumerate(route, 1):
         line_key = seg.get("line_key")
         line_def = _find_line_def(line_key)
@@ -807,6 +828,14 @@ def build_through_line_def(route: list) -> dict:
         i, j = names.index(frm), names.index(to)
         if i == j:
             raise ValueError(f"route {n}番目: 始点と終点が同じ駅「{frm}」です。")
+
+        this_seg = {"line_key": line_key, "from": frm, "to": to}
+        if prev_seg is not None:
+            try:
+                _check_junction_rules(prev_seg, this_seg)
+            except ValueError as e:
+                raise ValueError(f"route {n}番目: {e}") from None
+        prev_seg = this_seg
         forward = i < j
         idxs = list(range(i, j + 1)) if forward else list(range(i, j - 1, -1))
         times = (list(line_def["run_times_sec"][i:j]) if forward
