@@ -24,6 +24,7 @@ from oud2_export import (
     expand_generate_spec,
     resolve_line_def,
 )
+from stations_data import service_color
 
 
 def _find_line(line_key: str) -> dict:
@@ -155,7 +156,7 @@ def build_untenkeikaku_html(line_key: str = "obakyu_main", train_number: str = N
 </head>
 <body>
   <h1>運転計画</h1>
-  <div class="sub">{line_def['line_name']}　{direction_label}　{service_name}</div>
+  <div class="sub">{line_def['line_name']}　{direction_label}　<b style="color:{service_color(service_name)}">{service_name}</b></div>
   <div class="trainno">{train['train_number']}</div>
   <table>
     <tr><th>停車駅名</th><th>着</th><th>発(通)</th></tr>
@@ -200,7 +201,7 @@ def build_diagram_figure(
     )
 
     color_map = {
-        name: _PALETTE[i % len(_PALETTE)] for i, name in enumerate(line_def["service_types"])
+        name: service_color(name, i) for i, name in enumerate(line_def["service_types"])
     }
 
     x_min, x_max = hour_start * 3600, hour_end * 3600
@@ -233,11 +234,24 @@ def build_diagram_figure(
                     name=f"{service} {train['train_number']}",
                     hoverinfo="name",
                     showlegend=False,
+                    legendgroup=service,
                 )
             )
 
     add_trains(kudari, "solid")
     add_trains(nobori, "dot")
+
+    # 凡例（種別と色の対応）。実際に図に描かれた種別だけを出す
+    drawn = {tr.legendgroup for tr in fig.data}
+    for name in line_def["service_types"]:
+        if name not in drawn:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=[None], y=[None], mode="lines", name=name, legendgroup=name,
+                line=dict(color=color_map[name], width=3), showlegend=True, hoverinfo="skip",
+            )
+        )
 
     tick_vals = list(range(x_min, x_max + 1, 600))
     fig.update_yaxes(
@@ -258,6 +272,8 @@ def build_diagram_figure(
         height=max(500, n * 22),
         margin=dict(l=140, r=20, t=60, b=90),
         plot_bgcolor="white",
+        showlegend=True,
+        legend=dict(title=dict(text="種別"), orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#ddd")
     fig.update_yaxes(showgrid=True, gridcolor="#ddd")
@@ -469,7 +485,7 @@ def _render_untenhyou_html(formations: list, time_unit: str = "sec") -> bytes:
   <div class="formation-label">編成{f_idx} - 第{duty_idx}運用</div>
   <table class="headertable">
     <tr><th>列車番号</th><th>種別</th><th>行き先</th></tr>
-    <tr><td class="big">{info['train_number']}</td><td class="big">{info['service']}</td><td class="big">{info['destination']}</td></tr>
+    <tr><td class="big">{info['train_number']}</td><td class="big" style="color:{service_color(info['service'])}">{info['service']}</td><td class="big">{info['destination']}</td></tr>
   </table>
   <table class="maintable">
     <tr><th>駅名</th><th>着時刻</th><th>発時刻</th><th>通過待ち等</th></tr>
