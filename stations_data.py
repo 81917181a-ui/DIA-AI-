@@ -566,6 +566,33 @@ THROUGH_JUNCTIONS_TEXT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 種別ごとの表示色（ダイヤグラム・.oud2・運転表で共通）。種別名で決まるので、
+# 路線が違っても同じ種別（例: 急行）は同じ色になる。
+# ---------------------------------------------------------------------------
+SERVICE_COLORS_RGB = {
+    "各停": "#333333",
+    "普通": "#333333",
+    "BRT": "#333333",
+    "準急": "#1f9d3a",
+    "快速": "#e67e00",
+    "空港快速": "#00a3a3",
+    "急行": "#d62728",
+    "BRT2急行": "#d62728",
+    "快速急行": "#1f4fd8",
+    "区間急行": "#8e44ad",
+    "エアポート急行": "#d81b8a",
+}
+_FALLBACK_SERVICE_COLORS = ["#7f4f24", "#0b7285", "#a61e4d", "#5f3dc4", "#868e96"]
+
+
+def service_color(name: str, fallback_index: int = 0) -> str:
+    """種別名に対応する色（#RRGGBB）を返す。対応表にない種別は予備の色を順に使う。"""
+    if name in SERVICE_COLORS_RGB:
+        return SERVICE_COLORS_RGB[name]
+    return _FALLBACK_SERVICE_COLORS[fallback_index % len(_FALLBACK_SERVICE_COLORS)]
+
+
 def build_line_context_text() -> str:
     """AI（Gemini）にダイヤ作成の前提条件として渡すテキストを組み立てる。"""
     lines = ["# 尾羽急本線 路線データ", ""]
