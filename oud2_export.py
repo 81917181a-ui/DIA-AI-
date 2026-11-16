@@ -369,6 +369,68 @@ def _compute_stops_for_service(
     return stops
 
 
+# 同じ駅・同じ方向で、2本の列車の着（または始発の発）時刻がこの秒数より近いと
+# 「同じ時間に何本も出る」状態とみなし、できるだけ避ける
+MIN_SPACING_SEC = 90
+ORIGIN_WEIGHT = 20  # 始発駅での重なりを避ける優先度
+ORIGIN_GAP_SEC = 60          # 始発駅で同方向の列車の発車をあける最小間隔
+ORIGIN_SHIFT_MAX_SEC = 120   # 重なりを避けるために始発を後ろへずらしてよい最大秒数
+
+
+def _train_event_times(stops: dict) -> dict:
+    """列車1本の {駅インデックス: その駅に着く（始発駅なら発つ）時刻} を返す。通過駅は除く。"""
+    result = {}
+    for idx, (arr, dep) in stops.items():
+        x = arr if arr is not None else dep
+        if x is not None:
+            result[idx] = x
+    return result
+
+
+def _spacing_cost(placed: dict, candidate_trains: list):
+    """
+    すでに置いた列車（placed: {駅: ソート済み時刻リスト}）に候補の列車群を足したとき、
+    近すぎる（MIN_SPACING_SEC未満）組の数と、最小間隔を返す。小さい数・大きい間隔ほど良い。
+    """
+    import bisect
+    new = {}
+    origins = set()
+    for t in candidate_trains:
+        for idx, (arr, dep) in t["stops"].items():
+            x = arr if arr is not None else dep
+            if x is None:
+                continue
+            new.setdefault(idx, []).append(x)
+            if arr is None:
+                origins.add(idx)
+
+    # 始発駅（ホームから一斉に出るのが一番目立つ）の重なりは、途中駅より重く数える
+    bad = 0
+    min_gap = 10 ** 9
+    for idx, times in new.items():
+        weight = ORIGIN_WEIGHT if idx in origins else 1
+        times.sort()
+        existing = placed.get(idx)
+        if not existing:
+            continue
+        for x in times:
+            k = bisect.bisect_left(existing, x)
+            for j in (k - 1, k):
+                if 0 <= j < len(existing):
+                    gap = abs(existing[j] - x)
+                    min_gap = min(min_gap, gap)
+                    if gap < MIN_SPACING_SEC:
+                        bad += weight
+    return bad, -min_gap
+
+
+def _place_trains(placed: dict, trains: list):
+    import bisect
+    for t in trains:
+        for idx, x in _train_event_times(t["stops"]).items():
+            bisect.insort(placed.setdefault(idx, []), x)
+
+
 def build_full_day_trains(
     stations: list,
     run_times_sec: list,
@@ -379,48 +441,120 @@ def build_full_day_trains(
     dwell_sec: int = DEFAULT_DWELL_SEC,
     headways: dict = None,
     one_way: bool = False,
+    stagger: bool = True,
+    active_services: set = None,
 ):
     """
     種別・方向ごとに、始発から終電まで運転間隔どおりに列車を並べた終日ダイヤを生成する。
     one_way=True の場合、逆方向（上り）の列車は作らない
     （一方通行の循環系統など、折り返しが存在しない経路向け）。
+
+    stagger=True（既定）の場合、種別ごとの始発時刻を少しずつずらし、同じ駅から
+    同じ方向へ複数の列車がほぼ同時に出る・着くことをできるだけ避ける。
+    ずらし幅は各種別の運転間隔の範囲内（始発から最初の1本が出るまでの間）で、
+    すでに置いた他の種別の列車と最も重ならない位置を種別ごとに選ぶ。
     """
     headways = headways or {}
     kudari_trains = []
     nobori_trains = []
 
-    for service_index, service in enumerate(service_types):
-        headway = headways.get(service, DEFAULT_HEADWAY_SEC.get(service, 20 * 60))
+    direction_of = {}
+    if active_services is not None:
+        # 指定された種別だけを走らせる（それ以外の種別の列車は作らない）
+        headways = dict(headways)
 
+    # 運転間隔の短い種別（本数の多い種別）から先に置き、あとの種別が空いている所へ入るようにする
+    order = sorted(
+        (i for i in range(len(service_types))
+         if active_services is None or service_types[i] in active_services),
+        key=lambda i: headways.get(service_types[i], DEFAULT_HEADWAY_SEC.get(service_types[i], 20 * 60)),
+    )
+    active_index = set(order)
+
+    def make(service_index, service, direction, headway, first, prefix):
+        trains = []
         seq = 1
-        t = start_sec
+        t = first
         while t < end_sec:
             stops = _compute_stops_for_service(
-                stations, run_times_sec, service, "Kudari", t, dwell_sec, express_times
+                stations, run_times_sec, service, direction, t, dwell_sec, express_times
             )
-            train_number = f"{service_index + 1}0{seq:03d}"
-            kudari_trains.append(
-                {"service_index": service_index, "train_number": train_number, "stops": stops}
+            trains.append(
+                {
+                    "service_index": service_index,
+                    "train_number": f"{service_index + 1}{prefix}{seq:03d}",
+                    "stops": stops,
+                    "start_sec": t,
+                }
             )
             seq += 1
             t += headway
+        return trains
 
-        if one_way:
+    def spread_origin(bucket, headways_by_index):
+        """
+        種別ごとの位相をずらしても、運転間隔が違う種別どうしは一日のどこかで始発駅の発車が
+        重なる。重なった列車だけを、始発時刻を後ろへ少しずらして（最大ORIGIN_SHIFT_MAX_SEC）
+        始発駅の発車間隔をORIGIN_GAP_SEC以上あける。
+        """
+        if not bucket:
+            return
+        # 本数が多すぎて物理的に間隔をあけられない（過密ダイヤ等）ときは、あけられる範囲に緩める
+        rate = sum(1.0 / h for h in headways_by_index.values() if h > 0)
+        gap = ORIGIN_GAP_SEC
+        if rate > 0:
+            gap = min(gap, int(0.8 / rate))
+        gap = max(gap, 10)
+
+        last = None
+        for t in sorted(bucket, key=lambda x: (x["start_sec"], -x["service_index"])):
+            start = t["start_sec"]
+            new_start = start if last is None else max(start, last + gap)
+            if new_start - start > ORIGIN_SHIFT_MAX_SEC:
+                new_start = start
+            if new_start != start:
+                t["stops"] = _compute_stops_for_service(
+                    stations, run_times_sec, service_types[t["service_index"]],
+                    direction_of[id(t)], new_start, dwell_sec, express_times,
+                )
+                t["start_sec"] = new_start
+            last = new_start
+
+    for direction, prefix, bucket in (("Kudari", "0", kudari_trains), ("Nobori", "5", nobori_trains)):
+        if direction == "Nobori" and one_way:
             continue
+        placed = {}
+        for service_index in order:
+            service = service_types[service_index]
+            headway = headways.get(service, DEFAULT_HEADWAY_SEC.get(service, 20 * 60))
 
-        seq = 1
-        t = start_sec
-        while t < end_sec:
-            stops = _compute_stops_for_service(
-                stations, run_times_sec, service, "Nobori", t, dwell_sec, express_times
-            )
-            train_number = f"{service_index + 1}5{seq:03d}"
-            nobori_trains.append(
-                {"service_index": service_index, "train_number": train_number, "stops": stops}
-            )
-            seq += 1
-            t += headway
+            best_trains = None
+            if stagger and bucket is not None and placed:
+                step = 10 if headway <= 600 else 20
+                best_cost = None
+                for offset in range(0, max(step, headway), step):
+                    cand = make(service_index, service, direction, headway, start_sec + offset, prefix)
+                    cost = _spacing_cost(placed, cand)
+                    if best_cost is None or cost < best_cost:
+                        best_cost, best_trains = cost, cand
+            if best_trains is None:
+                best_trains = make(service_index, service, direction, headway, start_sec, prefix)
 
+            _place_trains(placed, best_trains)
+            for t in best_trains:
+                direction_of[id(t)] = direction
+            bucket.extend(best_trains)
+
+        if stagger:
+            spread_origin(
+                bucket,
+                {i: headways.get(service_types[i], DEFAULT_HEADWAY_SEC.get(service_types[i], 20 * 60))
+                 for i in active_index},
+            )
+
+    # 出力の並びは従来どおり、種別の定義順（service_index順）にそろえる
+    kudari_trains.sort(key=lambda t: (t["service_index"], t["train_number"]))
+    nobori_trains.sort(key=lambda t: (t["service_index"], t["train_number"]))
     return kudari_trains, nobori_trains
 
 
@@ -848,7 +982,15 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
     dwell_sec = int(generate_spec.get("dwell_sec", DEFAULT_DWELL_SEC))
 
     headway_min = generate_spec.get("headway_min") or {}
-    headways = {name: int(round(float(mins) * 60)) for name, mins in headway_min.items()} or None
+    headways = {}
+    for name, mins in headway_min.items():
+        # 直通ダイヤでは「普通」など路線ごとの呼び名で書かれても、その路線の種別名に直す
+        real = normalize_service_name(name, line_def["service_types"])
+        if real is not None:
+            headways[real] = int(round(float(mins) * 60))
+    # 運転間隔を書いた種別だけを走らせる（書かれていない種別の列車は作らない）
+    active = set(headways) if headways else None
+    headways = headways or None
 
     return build_full_day_trains(
         stations=line_def["stations"],
@@ -860,6 +1002,7 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
         dwell_sec=dwell_sec,
         headways=headways,
         one_way=line_def.get("one_way", False),
+        active_services=active,
     )
 
 
