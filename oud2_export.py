@@ -327,10 +327,13 @@ OPERATION_END_SEC = 24 * 3600    # 24:00 まで運転
 
 def _compute_stops_for_service(
     stations: list, run_times_sec: list, service: str, direction: str,
-    start_sec: int, dwell_sec: int, express_times: dict = None,
+    start_sec: int, dwell_sec: int, express_times: dict = None, first_idx: int = 0,
 ) -> dict:
     """
     指定した路線・種別・方向・始発時刻の列車1本ぶんの{駅インデックス: (着, 発)}を計算する。
+
+    first_idx: 路線の途中の駅を始発（下り）／終着（上り）にする場合の、その駅のインデックス。
+               0なら従来どおり路線の端から端まで走る。first_idxより手前の駅は経路に含めない。
 
     express_times: {(種別名, 停車駅A, 停車駅B): 秒} の形式で、AからBまでの直行所要時分を
                     個別指定できる（急行等が途中駅を通過して普通より速く走る場合に使う）。
@@ -338,7 +341,7 @@ def _compute_stops_for_service(
     """
     express_times = express_times or {}
     n = len(stations)
-    seq = list(range(n)) if direction == "Kudari" else list(range(n - 1, -1, -1))
+    seq = list(range(first_idx, n)) if direction == "Kudari" else list(range(n - 1, first_idx - 1, -1))
 
     stops = {}
     t = start_sec
@@ -366,7 +369,7 @@ def _compute_stops_for_service(
 
         if pos == 0:
             stops[idx] = (None, t)
-        elif pos == n - 1:
+        elif pos == len(seq) - 1:
             stops[idx] = (t, None)
         else:
             arr = t
@@ -452,6 +455,9 @@ def build_full_day_trains(
     one_way: bool = False,
     stagger: bool = True,
     active_services: set = None,
+    first_idx: int = 0,
+    seq_start: int = 1,
+    placed_state: dict = None,
 ):
     """
     種別・方向ごとに、始発から終電まで運転間隔どおりに列車を並べた終日ダイヤを生成する。
@@ -482,11 +488,11 @@ def build_full_day_trains(
 
     def make(service_index, service, direction, headway, first, prefix):
         trains = []
-        seq = 1
+        seq = seq_start
         t = first
         while t < end_sec:
             stops = _compute_stops_for_service(
-                stations, run_times_sec, service, direction, t, dwell_sec, express_times
+                stations, run_times_sec, service, direction, t, dwell_sec, express_times, first_idx
             )
             trains.append(
                 {
@@ -524,7 +530,7 @@ def build_full_day_trains(
             if new_start != start:
                 t["stops"] = _compute_stops_for_service(
                     stations, run_times_sec, service_types[t["service_index"]],
-                    direction_of[id(t)], new_start, dwell_sec, express_times,
+                    direction_of[id(t)], new_start, dwell_sec, express_times, first_idx,
                 )
                 t["start_sec"] = new_start
             last = new_start
@@ -532,7 +538,7 @@ def build_full_day_trains(
     for direction, prefix, bucket in (("Kudari", "0", kudari_trains), ("Nobori", "5", nobori_trains)):
         if direction == "Nobori" and one_way:
             continue
-        placed = {}
+        placed = placed_state.setdefault(direction, {}) if placed_state is not None else {}
         for service_index in order:
             service = service_types[service_index]
             headway = headways.get(service, DEFAULT_HEADWAY_SEC.get(service, 20 * 60))
@@ -781,6 +787,53 @@ def _check_junction_rules(prev: dict, cur: dict):
             )
 
 
+def _normalize_iguchi_route(route: list):
+    """
+    井口で井問線と尾羽急本線が「尾羽原側」でつながるrouteを、物理的に可能な形へ補正する。
+      A) 井問線 → 井口 → 尾羽原方面: 井問線から来た列車は尾羽原へ行けないので、井口で終着とし、
+         それ以降の区間は捨てる（次の運転は井口始発）。
+      B) 尾羽原方面 → 井口 → 井問線: 尾羽原から井問線へは行けないので、尾羽原側の区間を捨て、
+         井問線は井口始発とする。
+    戻り値: (補正後のroute, 補正内容のメッセージのリスト)
+    """
+    resolved = []
+    prev_to = None
+    for seg in route:
+        line_def = _find_line_def(seg.get("line_key"))
+        if line_def is None:
+            return route, []  # 路線キーの誤りは、この後の本処理でエラーにする
+        names = [st["name"] for st in line_def["stations"]]
+        frm = seg.get("from") or prev_to or names[0]
+        if frm not in names:
+            return route, []
+        to = seg.get("to") or (names[-1] if names.index(frm) == 0 else names[0])
+        resolved.append({"line_key": seg["line_key"], "from": frm, "to": to})
+        prev_to = to
+
+    main_names = [st["name"] for st in STATIONS]
+    fixups = []
+    out = []
+    for seg in resolved:
+        if out:
+            prev = out[-1]
+            if prev["to"] == "井口" and {prev["line_key"], seg["line_key"]} == {"itoi_line", "obakyu_main"}:
+                main = prev if prev["line_key"] == "obakyu_main" else seg
+                other = main["from"] if main is prev else main["to"]
+                if other in main_names and main_names.index(other) < main_names.index("井口"):
+                    if prev["line_key"] == "itoi_line":
+                        fixups.append(
+                            "井問線から来た列車は尾羽原へ行けないため、井口で終着にしました"
+                            "（井口から先は井口始発の列車が安越方面へ出ます）。"
+                        )
+                        break
+                    out = []
+                    fixups.append(
+                        "尾羽原から井問線へは直通できないため、井問線は井口始発にしました。"
+                    )
+        out.append(seg)
+    return out, fixups
+
+
 def build_through_line_def(route: list) -> dict:
     """
     複数路線を接続駅でつなげた「直通路線」を、LINE_DEFSの1要素と同じ形で組み立てる。
@@ -796,6 +849,8 @@ def build_through_line_def(route: list) -> dict:
     """
     if not route:
         raise ValueError("route（路線の並び）が空です。")
+
+    route, fixups = _normalize_iguchi_route(route)
 
     stations = []
     run_times = []
@@ -885,6 +940,7 @@ def build_through_line_def(route: list) -> dict:
         "service_types": service_types,
         "run_times_sec": run_times,
         "express_times": express,
+        "fixups": fixups,
     }
 
 
@@ -1008,29 +1064,34 @@ def _parse_time_to_sec(value):
     return int(h) * 3600 + int(m) * 60 + int(s)
 
 
+def _headways_from_min(headway_min: dict, line_def: dict):
+    """{種別名: 分} を {その路線の種別名: 秒} に直す。戻り値: (headways, 走らせる種別の集合)"""
+    headways = {}
+    for name, mins in (headway_min or {}).items():
+        # 直通ダイヤでは「普通」など路線ごとの呼び名で書かれても、その路線の種別名に直す
+        real = normalize_service_name(name, line_def["service_types"])
+        if real is not None:
+            headways[real] = int(round(float(mins) * 60))
+    return headways, (set(headways) if headways else None)
+
+
 def expand_generate_spec(generate_spec: dict, line_def: dict):
     """
     "generate"仕様（start_hour/end_hour/headway_min/dwell_sec）から、build_full_day_trainsを
     使って実際の列車一覧を機械的に生成する。Geminiに全列車を手で書かせる代わりに、
     「条件」だけをJSONで渡してもらい、本数が多いダイヤもこちら側で確実に生成するための仕組み。
+
+    "origins"（始発駅ごとの運転間隔）を指定すると、始発駅の違う列車をまとめて作れる:
+      "origins": [{"station": "尾羽原", "headway_min": {"各停": 17}},
+                  {"station": "井口", "headway_min": {"各停": 8, "急行": 20}}]
+    下りはその駅から終点まで、上りは終点からその駅まで走る（同じ駅名が経路に2回あれば最初の方）。
     戻り値: (kudari_trains, nobori_trains)（いずれも内部形式のリスト）
     """
     start_sec = int(float(generate_spec.get("start_hour", 6)) * 3600)
     end_sec = int(float(generate_spec.get("end_hour", 24)) * 3600)
     dwell_sec = int(generate_spec.get("dwell_sec", DEFAULT_DWELL_SEC))
 
-    headway_min = generate_spec.get("headway_min") or {}
-    headways = {}
-    for name, mins in headway_min.items():
-        # 直通ダイヤでは「普通」など路線ごとの呼び名で書かれても、その路線の種別名に直す
-        real = normalize_service_name(name, line_def["service_types"])
-        if real is not None:
-            headways[real] = int(round(float(mins) * 60))
-    # 運転間隔を書いた種別だけを走らせる（書かれていない種別の列車は作らない）
-    active = set(headways) if headways else None
-    headways = headways or None
-
-    return build_full_day_trains(
+    common = dict(
         stations=line_def["stations"],
         run_times_sec=line_def["run_times_sec"],
         service_types=line_def["service_types"],
@@ -1038,10 +1099,34 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
         start_sec=start_sec,
         end_sec=end_sec,
         dwell_sec=dwell_sec,
-        headways=headways,
         one_way=line_def.get("one_way", False),
-        active_services=active,
     )
+
+    origins = generate_spec.get("origins")
+    if not origins:
+        headways, active = _headways_from_min(generate_spec.get("headway_min"), line_def)
+        return build_full_day_trains(headways=headways or None, active_services=active, **common)
+
+    names = [st["name"] for st in line_def["stations"]]
+    kudari_all, nobori_all = [], []
+    placed_state = {}  # 始発駅が違う列車どうしでも、時刻が重ならないよう共有する
+    for o_no, origin in enumerate(origins):
+        station = origin.get("station")
+        if station not in names:
+            raise ValueError(f"origins: 駅「{station}」がこの経路にありません。")
+        first_idx = names.index(station)
+        if first_idx >= len(names) - 1:
+            raise ValueError(f"origins: 駅「{station}」は終点のため始発駅にできません。")
+        headways, active = _headways_from_min(
+            origin.get("headway_min") or generate_spec.get("headway_min"), line_def
+        )
+        k, n = build_full_day_trains(
+            headways=headways or None, active_services=active,
+            first_idx=first_idx, seq_start=1 + o_no * 100, placed_state=placed_state, **common,
+        )
+        kudari_all.extend(k)
+        nobori_all.extend(n)
+    return kudari_all, nobori_all
 
 
 def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
