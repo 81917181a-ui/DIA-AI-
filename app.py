@@ -31,6 +31,7 @@ from oud2_export import (
     build_all_lines_zip,
     build_oud2_from_custom_dia,
     build_dense_oud2,
+    resolve_line_def,
 )
 from diagram_export import (
     build_untenkeikaku_html,
@@ -165,6 +166,18 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
     環状にするときは「井口→（安越方面）→千鳥→（尾羽急高速線）問屋町→（井問線）本郷→…→井口」の向きで
     routeを組み、井口に戻ったらまた安越方面へ進む。尾羽原へ行く列車は、井口〜尾羽原の支線として
     別の列車（line_keyのみのダイヤ）で、15〜20分間隔などで運転すること。
+  - 尾羽原は列車の始発駅としてだけ使い、routeの先頭を尾羽原から始めること。井問線から井口に着いた列車は
+    尾羽原へは行かず井口で終着し、次の運転は井口始発として安越方面へ出る。そのため環状・直通のrouteは
+    井問線を最後に置き、「本線（尾羽原→千鳥）→高速線（千鳥→問屋町）→井問線（問屋町→井口）」の形にすること。
+  - 尾羽原始発の列車と井口始発の列車を両方走らせるときは、generateに "origins" を使い、始発駅ごとに
+    運転間隔（分）を書くこと。尾羽原始発は約15〜20分間隔（指定がなければ17分、各停・準急など）にする。
+  <!--DIA_JSON {{"line_key": "through", "route": [{{"line_key": "obakyu_main", "from": "尾羽原", "to": "千鳥"}},
+  {{"line_key": "rapid_line", "from": "千鳥", "to": "問屋町"}}, {{"line_key": "itoi_line", "from": "問屋町", "to": "井口"}}],
+  "generate": {{"start_hour": 15, "end_hour": 16.5, "origins": [{{"station": "尾羽原", "headway_min": {{"各停": 17, "準急": 17}}}},
+  {{"station": "井口", "headway_min": {{"各停": 8, "準急": 12, "急行": 20, "快速急行": 30}}}}]}}}} -->
+  - originsのstationはrouteにある駅名（同じ駅名が2回あれば最初の方）。下りはその駅から経路の終点まで、上りは終点から
+    その駅まで走る。つまり尾羽原始発は尾羽原〜井問線の井口まで通して走り、井口始発は最初の井口から井問線の井口まで走る
+    （上りは井口始発の列車が最初の井口で終着、尾羽原始発の列車は尾羽原まで行く）。
   - stopsの駅名は、routeでつなげた経路の駅名と完全に一致させること。
   - 直通でない通常のダイヤでは、これまでどおり "line_key" のみを書く（"route"は書かない）。
   - 直通ダイヤのstopsには、上り（Nobori）の場合も駅を進行方向の順に並べること。
@@ -1013,6 +1026,11 @@ def main():
                         key=f"oud2_custom_dl_new_{current_id}_{len(messages)}",
                     )
                     oud2_attached = "custom"
+                    try:
+                        for _note in resolve_line_def(custom_dia_for_oud2).get("fixups", []):
+                            st.caption(f"（{_note}）")
+                    except Exception:
+                        pass
                 except Exception as e:
                     reply = (
                         f"直前のダイヤを.oud2に変換できませんでした（{e}）。"
@@ -1122,6 +1140,11 @@ def main():
                                     key=f"oud2_fresh_dl_new_{current_id}_{len(messages)}",
                                 )
                                 oud2_attached = "custom"
+                                try:
+                                    for _note in resolve_line_def(new_custom_dia).get("fixups", []):
+                                        st.caption(f"（{_note}）")
+                                except Exception:
+                                    pass
                             except Exception as e:
                                 st.caption(f"（このダイヤの.oud2変換に失敗しました: {e}）")
                         else:
