@@ -23,6 +23,8 @@ from oud2_export import (
     _parse_time_to_sec,
     expand_generate_spec,
     resolve_line_def,
+    expand_custom_dia,
+    build_oud2_file,
 )
 from stations_data import service_color
 
@@ -382,9 +384,28 @@ def _infos_from_internal_trains(line_def: dict, kudari_trains: list, nobori_trai
                     "origin_time": origin_dep if origin_dep is not None else origin_arr,
                     "terminus_idx": stop_indices[-1],
                     "terminus_time": terminus_arr if terminus_arr is not None else terminus_dep,
+                    "internal": train,
+                    "direction": direction,
+                    "duty": train.get("duty", ""),
                 }
             )
     return infos
+
+
+def assign_formations(infos: list, min_turnback_sec: int = 180):
+    """
+    編成（運用）ごとの列車グループを返す。全列車に運用番号（"duty"）が付いていれば、その運用番号で
+    分ける（運用番号の順）。付いていなければ、到着駅＝次の発車駅・折り返し時間の条件から推定する。
+    """
+    if infos and all(i.get("duty") for i in infos):
+        groups = {}
+        for i in infos:
+            groups.setdefault(i["duty"], []).append(i)
+        return [
+            sorted(trains, key=lambda x: x["origin_time"] if x["origin_time"] is not None else 0)
+            for _, trains in sorted(groups.items())
+        ]
+    return _assign_formations(infos, min_turnback_sec=min_turnback_sec)
 
 
 def _assign_formations(infos: list, min_turnback_sec: int = 180):
@@ -434,7 +455,7 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
     if custom_dia.get("generate"):
         kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
         infos = _infos_from_internal_trains(line_def, kudari_trains, nobori_trains)
-        formations = _assign_formations(infos, min_turnback_sec=min_turnback_sec)
+        formations = assign_formations(infos, min_turnback_sec=min_turnback_sec)
         return _render_untenhyou_html(formations, time_unit), len(formations), len(infos)
 
     infos = []
@@ -462,11 +483,52 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
                 "origin_time": origin_time,
                 "terminus_idx": indices[-1],
                 "terminus_time": terminus_time,
+                "duty": str(train.get("duty") or "").strip(),
             }
         )
 
-    formations = _assign_formations(infos, min_turnback_sec=min_turnback_sec)
+    formations = assign_formations(infos, min_turnback_sec=min_turnback_sec)
     return _render_untenhyou_html(formations, time_unit), len(formations), len(infos)
+
+
+def build_formation_oud2_zip(custom_dia: dict, min_turnback_sec: int = 180):
+    """
+    チャットで作られたダイヤ（DIA_JSON）を、編成（運用）ごとに別々の.oud2ファイルへ分け、
+    1つのzipにまとめて返す。1ファイルには、その編成が走る列車（往復すべて）だけが入る。
+
+    編成の分け方: 全列車に運用番号（"duty"）があればそれで分け、なければ運転表と同じ推定
+    （到着駅＝次の発車駅、折り返し時間min_turnback_sec秒以上）でつなげる。
+
+    戻り値: (zipのbytes, ファイル数, 列車数, ファイル名のリスト)
+    """
+    import io
+    import zipfile
+
+    line_def, kudari_trains, nobori_trains = expand_custom_dia(custom_dia)
+    infos = _infos_from_internal_trains(line_def, kudari_trains, nobori_trains)
+    if not infos:
+        raise ValueError("列車が1本もないため、.oud2に分けられません。")
+    formations = assign_formations(infos, min_turnback_sec=min_turnback_sec)
+
+    buf = io.BytesIO()
+    names = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f_no, trains_in_formation in enumerate(formations, start=1):
+            duty = trains_in_formation[0].get("duty") or ""
+            label = duty if duty else f"編成{f_no:02d}"
+            file_name = f"{label}.oud2"
+            if file_name in names:  # 念のため重複を避ける
+                file_name = f"{label}_{f_no:02d}.oud2"
+            ks = [i["internal"] for i in trains_in_formation if i["direction"] == "Kudari"]
+            ns = [i["internal"] for i in trains_in_formation if i["direction"] == "Nobori"]
+            ks.sort(key=lambda t: min((v for pair in t["stops"].values() for v in pair if v is not None), default=0))
+            ns.sort(key=lambda t: min((v for pair in t["stops"].values() for v in pair if v is not None), default=0))
+            text = build_oud2_file(
+                line_def["line_name"], label, line_def["stations"], line_def["service_types"], ks, ns
+            )
+            zf.writestr(file_name, text.encode("utf-8"))
+            names.append(file_name)
+    return buf.getvalue(), len(formations), len(infos), names
 
 
 def _render_untenhyou_html(formations: list, time_unit: str = "sec") -> bytes:
