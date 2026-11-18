@@ -1129,6 +1129,54 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
     return kudari_all, nobori_all
 
 
+def expand_custom_dia(custom_dia: dict):
+    """
+    チャットで作られたダイヤ（DIA_JSON）を、路線定義と内部形式の列車一覧に展開する。
+    "generate"があれば条件から機械的に、"trains"があれば書かれた列車をそのまま使う。
+    戻り値: (line_def, kudari_trains, nobori_trains)
+    列車の辞書には、"trains"形式で"duty"（運用番号）が書かれていれば"duty"も入る。
+    """
+    line_def = resolve_line_def(custom_dia)
+
+    stations = line_def["stations"]
+    service_types = line_def["service_types"]
+
+    if custom_dia.get("generate"):
+        kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
+        return line_def, kudari_trains, nobori_trains
+
+    kudari_trains = []
+    nobori_trains = []
+
+    for train in custom_dia.get("trains", []):
+        direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
+        service_name = normalize_service_name(train.get("service"), service_types)
+        service_index = service_types.index(service_name) if service_name in service_types else 0
+
+        indices = _match_station_indices(stations, train, direction)
+        if not indices:
+            continue
+
+        stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
+        for pos, idx in enumerate(indices):
+            stop = train["stops"][pos]
+            stops[idx] = (
+                _parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure"))
+            )
+
+        entry = {
+            "service_index": service_index,
+            "train_number": str(train.get("train_number") or ""),
+            "stops": stops,
+        }
+        duty = str(train.get("duty") or "").strip()
+        if duty:
+            entry["duty"] = duty
+        (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
+
+    return line_def, kudari_trains, nobori_trains
+
+
 def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
     """
     チャットでユーザーが実際に依頼して作られたダイヤ（Geminiが出力したDIA_JSON）から
@@ -1138,42 +1186,10 @@ def build_oud2_from_custom_dia(custom_dia: dict) -> bytes:
     build_full_day_trainsで機械的に大量の列車を展開する。
     "trains"（個別の列車リスト）を持つ場合は、その内容をそのまま使う。
     """
-    line_def = resolve_line_def(custom_dia)
-
-    stations = line_def["stations"]
-    service_types = line_def["service_types"]
-
-    if custom_dia.get("generate"):
-        kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
-    else:
-        kudari_trains = []
-        nobori_trains = []
-
-        for train in custom_dia.get("trains", []):
-            direction = train.get("direction") if train.get("direction") in ("Kudari", "Nobori") else "Kudari"
-            service_name = normalize_service_name(train.get("service"), service_types)
-            service_index = service_types.index(service_name) if service_name in service_types else 0
-
-            indices = _match_station_indices(stations, train, direction)
-            if not indices:
-                continue
-
-            stops = {idx: (None, None) for idx in range(min(indices), max(indices) + 1)}
-            for pos, idx in enumerate(indices):
-                stop = train["stops"][pos]
-                stops[idx] = (
-                    _parse_time_to_sec(stop.get("arrival")), _parse_time_to_sec(stop.get("departure"))
-                )
-
-            entry = {
-                "service_index": service_index,
-                "train_number": str(train.get("train_number") or ""),
-                "stops": stops,
-            }
-            (kudari_trains if direction == "Kudari" else nobori_trains).append(entry)
-
+    line_def, kudari_trains, nobori_trains = expand_custom_dia(custom_dia)
     dia_name = custom_dia.get("dia_name") or "お願いしたダイヤ"
     text = build_oud2_file(
-        line_def["line_name"], dia_name, stations, service_types, kudari_trains, nobori_trains
+        line_def["line_name"], dia_name, line_def["stations"], line_def["service_types"],
+        kudari_trains, nobori_trains,
     )
     return text.encode("utf-8")
