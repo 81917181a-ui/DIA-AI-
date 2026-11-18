@@ -42,6 +42,7 @@ from diagram_export import (
     is_dense_schedule_request,
     parse_headway_sec,
     build_untenhyou_html,
+    build_formation_oud2_zip,
     is_untenhyou_request,
     parse_time_unit,
 )
@@ -126,6 +127,10 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
   - 書き方1で複数の列車を並べるときは、同じ駅から同じ方向へ出る列車の発車時刻を、
     他の列車と最低でも2分以上ずらすこと（同じ時刻や近い時刻に何本も出さない）。
   - 起点駅はarrivalをnull、終点駅はdepartureをnullにすること。
+  - 運用（編成）の番号を指定されたとき（例:「運用番号は01〇〜10〇」「10編成」）や、各列車（編成）を
+    個別の.oud2ファイルにする依頼のときは、各列車に "duty": "<運用番号>"（例: "01A"）を付け、
+    運用ごとに、その運用が走る全ての列車（往復）を列挙すること。同じ運用番号の列車は同じ編成として、
+    1つの.oud2ファイルにまとめられる。
 
   ## 書き方2: 条件（始発・終電・運転間隔など）だけを指定する（「過密ダイヤ」
     「終日のダイヤ」「◯分間隔で」のように、本数の多いダイヤを求められた場合は
@@ -416,7 +421,27 @@ def delete_conversation(db, conversation_id: str):
 def is_oud2_export_request(user_input: str) -> bool:
     """「oud2にして」「oudiaファイルお願い」のように、oud2/oudiaへの言及があれば反応する。"""
     lowered = user_input.lower()
-    return ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
+    return (
+        ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
+        or any(w in user_input for w in ("おうでぃあ", "オウディア", "オーディア", "おーでぃあ"))
+    )
+
+
+INDIVIDUAL_WORDS = (
+    "個別", "各列車", "各編成", "編成ごと", "編成別", "運用ごと", "運用別", "列車ごと", "列車別",
+    "それぞれ", "別々", "1つずつ", "一つずつ", "ひとつずつ", "1本ずつ", "一本ずつ", "1編成ずつ",
+)
+
+
+def is_individual_oud2_request(user_input: str) -> bool:
+    """「各列車のダイヤをoud2ファイルにして」のように、編成（運用）ごとに別々のoud2を求める依頼か。"""
+    return is_oud2_export_request(user_input) and any(w in user_input for w in INDIVIDUAL_WORDS)
+
+
+def parse_requested_file_count(user_input: str):
+    """「10編成」「10個」のように、欲しいファイル数が書かれていればその数を返す。"""
+    m = re.search(r"(\d{1,3})\s*(?:編成|個|ファイル|運用)", user_input)
+    return int(m.group(1)) if m else None
 
 
 def is_untenkeikaku_request(user_input: str) -> bool:
@@ -975,6 +1000,18 @@ def main():
                 except Exception as e:
                     # 路線データの変更などで過去のダイヤが作れなくなっても、チャット画面全体は落とさない
                     st.caption(f"（このダイヤの.oud2は現在のデータでは作成できません: {e}）")
+            elif msg.get("oud2") == "individual":
+                try:
+                    zip_bytes, _, _, _ = build_formation_oud2_zip(msg["custom_dia"])
+                    st.download_button(
+                        "📥 編成ごとの.oud2をzipでダウンロード",
+                        data=zip_bytes,
+                        file_name="formations_oud2.zip",
+                        mime="application/zip",
+                        key=f"oud2_indiv_dl_{current_id}_{i}",
+                    )
+                except Exception as e:
+                    st.caption(f"（編成ごとの.oud2は現在のデータでは作成できません: {e}）")
             elif msg.get("oud2"):
                 st.download_button(
                     "📥 .oud2ファイルをダウンロード",
@@ -1036,7 +1073,8 @@ def main():
 
         rename_target = try_extract_rename_request(user_input)
         oud2_request = is_oud2_export_request(user_input)
-        oud2_all_lines = oud2_request and any(
+        oud2_individual = oud2_request and is_individual_oud2_request(user_input)
+        oud2_all_lines = oud2_request and not oud2_individual and any(
             w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")
         )
         untenkeikaku_request = is_untenkeikaku_request(user_input)
@@ -1057,6 +1095,43 @@ def main():
                 rename_conversation(db, current_id, rename_target)
                 reply = f"チャット名を「{rename_target}」に変更しました。"
                 st.markdown(reply)
+            elif oud2_individual and find_last_custom_dia(messages[:-1]):
+                custom_dia_for_oud2 = find_last_custom_dia(messages[:-1])
+                try:
+                    zip_bytes, n_files, n_trains, file_names = build_formation_oud2_zip(custom_dia_for_oud2)
+                    reply = (
+                        f"直前にお願いいただいたダイヤ（列車{n_trains}本）を、編成（運用）ごとに"
+                        f"{n_files}個の.oud2ファイルに分けました。下のボタンからzipでダウンロードして、"
+                        "解凍したファイルをOuDiaSecondで開いてください。"
+                        "各ファイルには、その編成が走る列車（往復すべて）だけが入っています。"
+                    )
+                    wanted = parse_requested_file_count(user_input)
+                    if wanted and wanted != n_files:
+                        reply += (
+                            f"\n\n※ご指定は{wanted}でしたが、このダイヤから分けられた編成は{n_files}でした。"
+                            "編成数を指定する場合は、運用番号を決めてダイヤを作り直してください"
+                            "（例:「運用番号01A〜10Jの10編成でダイヤを作って」）。"
+                        )
+                    st.markdown(reply)
+                    st.download_button(
+                        "📥 編成ごとの.oud2をzipでダウンロード",
+                        data=zip_bytes,
+                        file_name="formations_oud2.zip",
+                        mime="application/zip",
+                        key=f"oud2_indiv_dl_new_{current_id}_{len(messages)}",
+                    )
+                    oud2_attached = "individual"
+                    try:
+                        for _note in resolve_line_def(custom_dia_for_oud2).get("fixups", []):
+                            st.caption(f"（{_note}）")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    reply = (
+                        f"直前のダイヤを編成ごとの.oud2に分けられませんでした（{e}）。"
+                        "停車駅・時刻が分かるダイヤを先にお願いしてから、もう一度試してください。"
+                    )
+                    st.markdown(reply)
             elif oud2_all_lines:
                 reply = (
                     "尾羽急本線・千鳥支線・井問線・東阪モノレール・尾羽急高速線・金田線、"
@@ -1218,15 +1293,27 @@ def main():
                     if oud2_request:
                         if new_custom_dia:
                             try:
-                                oud2_bytes = build_oud2_from_custom_dia(new_custom_dia)
-                                st.download_button(
-                                    "📥 このダイヤを.oud2でダウンロード",
-                                    data=oud2_bytes,
-                                    file_name="custom_dia.oud2",
-                                    mime="application/octet-stream",
-                                    key=f"oud2_fresh_dl_new_{current_id}_{len(messages)}",
-                                )
-                                oud2_attached = "custom"
+                                if oud2_individual:
+                                    zip_bytes, n_files, _, _ = build_formation_oud2_zip(new_custom_dia)
+                                    st.caption(f"（編成（運用）ごとに{n_files}個の.oud2に分けました）")
+                                    st.download_button(
+                                        "📥 編成ごとの.oud2をzipでダウンロード",
+                                        data=zip_bytes,
+                                        file_name="formations_oud2.zip",
+                                        mime="application/zip",
+                                        key=f"oud2_indiv_fresh_dl_new_{current_id}_{len(messages)}",
+                                    )
+                                    oud2_attached = "individual"
+                                else:
+                                    oud2_bytes = build_oud2_from_custom_dia(new_custom_dia)
+                                    st.download_button(
+                                        "📥 このダイヤを.oud2でダウンロード",
+                                        data=oud2_bytes,
+                                        file_name="custom_dia.oud2",
+                                        mime="application/octet-stream",
+                                        key=f"oud2_fresh_dl_new_{current_id}_{len(messages)}",
+                                    )
+                                    oud2_attached = "custom"
                                 try:
                                     for _note in resolve_line_def(new_custom_dia).get("fixups", []):
                                         st.caption(f"（{_note}）")
@@ -1266,7 +1353,7 @@ def main():
         assistant_message = {"role": "assistant", "content": reply}
         if oud2_attached:
             assistant_message["oud2"] = oud2_attached
-            if oud2_attached == "custom" and custom_dia_for_oud2:
+            if oud2_attached in ("custom", "individual") and custom_dia_for_oud2:
                 assistant_message["custom_dia"] = custom_dia_for_oud2
             if oud2_attached == "dense" and dense_oud2_info:
                 assistant_message["dense_oud2"] = dense_oud2_info
