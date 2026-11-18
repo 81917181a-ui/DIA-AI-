@@ -570,6 +570,85 @@ def get_gemini_api_keys() -> list:
     return keys
 
 
+# ---------------------------------------------------------------------------
+# アクセスログ（IP・日本時間）と、質問のウェブフック送信
+# ---------------------------------------------------------------------------
+JST = timezone(timedelta(hours=9))
+# 質問の送信先。専用のものを使いたい場合だけ QUESTION_WEBHOOK_URL を設定する
+# （未設定なら、エラー通知と同じ DISCORD_WEBHOOK_URL に送る）
+QUESTION_WEBHOOK_URL = os.environ.get("QUESTION_WEBHOOK_URL", "").strip() or DISCORD_WEBHOOK_URL
+
+
+def now_jst_str() -> str:
+    return datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+
+
+def get_client_ip() -> str:
+    """
+    アクセス元のIPアドレスを取得する。Renderなどのプロキシ経由では、接続元は
+    プロキシになるため、プロキシが付けるヘッダーから本来のIPを読む。取れなければ「不明」。
+    """
+    try:
+        headers = st.context.headers
+    except Exception:
+        return "不明"
+    for name in ("CF-Connecting-IP", "True-Client-IP"):
+        value = (headers.get(name) or "").strip()
+        if value:
+            return value
+    forwarded = (headers.get("X-Forwarded-For") or "").strip()
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return (headers.get("X-Real-IP") or "").strip() or "不明"
+
+
+def log_access(session_id: str):
+    """アクセス（ブラウザでページを開いた）ごとに、時刻（日本時間）とIPをRenderのLogsに残す。"""
+    print(
+        f"[access] {now_jst_str()} ip={get_client_ip()} sid={session_id}",
+        flush=True,
+    )
+
+
+def _post_webhook(url: str, content: str):
+    try:
+        payload = json.dumps(
+            {
+                "content": content,
+                # 質問文の中の @everyone などで、通知が飛ばないようにする
+                "allowed_mentions": {"parse": []},
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "obakyu-dia-ai/1.0"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        # 送信に失敗してもアプリは止めない（原因はログに残す）
+        print(f"[question] ウェブフックへの送信に失敗しました: {type(e).__name__}: {e}", flush=True)
+
+
+def send_question_webhook_async(question: str, ip: str, session_id: str):
+    """質問が送られるたびに、時刻（日本時間）・IPとともにウェブフックへ送る。画面は待たせない。"""
+    if not QUESTION_WEBHOOK_URL:
+        print("[question] ウェブフックのURLが未設定のため、質問は送っていません", flush=True)
+        return
+    body = question.strip().replace("```", "\u02cb\u02cb\u02cb")
+    if len(body) > 1500:
+        body = body[:1500] + "…（以下省略）"
+    content = (
+        f"💬 **質問** {now_jst_str()}\n"
+        f"IP: `{ip}` / セッション: `{session_id[:8]}`\n"
+        f"```\n{body}\n```"
+    )
+    threading.Thread(
+        target=_post_webhook, args=(QUESTION_WEBHOOK_URL, content[:1900]), daemon=True
+    ).start()
+
+
 def notify_discord(message: str):
     """DiscordのWebhookへ通知を送る（DISCORD_WEBHOOK_URL未設定なら何もしない）。"""
     # Renderの「Logs」でも原因が見えるように、通知内容は必ずログにも出す
@@ -755,6 +834,11 @@ def main():
         session_id = str(uuid.uuid4())
         st.query_params["sid"] = session_id
 
+    # アクセスログ：ページを開いた（新しいブラウザセッションの）ときに1回だけ残す
+    if not st.session_state.get("access_logged"):
+        st.session_state["access_logged"] = True
+        log_access(session_id)
+
     if "session_expires_at" not in st.session_state:
         _, st.session_state["session_expires_at"] = ensure_session(db, session_id)
     session_expires_at = st.session_state["session_expires_at"]
@@ -935,6 +1019,9 @@ def main():
     user_input = st.chat_input(placeholder="こんにちは！")
 
     if user_input:
+        # 質問が送られるたびに、ウェブフック（Renderの環境変数）へ送る
+        send_question_webhook_async(user_input, get_client_ip(), session_id)
+
         # ドラフト状態（新規チャット）なら、ここで初めてFirestoreにチャットを作成する
         is_new_conversation = current_id is None
         if is_new_conversation:
