@@ -328,12 +328,16 @@ OPERATION_END_SEC = 24 * 3600    # 24:00 まで運転
 def _compute_stops_for_service(
     stations: list, run_times_sec: list, service: str, direction: str,
     start_sec: int, dwell_sec: int, express_times: dict = None, first_idx: int = 0,
+    last_idx: int = None, terminals_stop: bool = False,
 ) -> dict:
     """
     指定した路線・種別・方向・始発時刻の列車1本ぶんの{駅インデックス: (着, 発)}を計算する。
 
     first_idx: 路線の途中の駅を始発（下り）／終着（上り）にする場合の、その駅のインデックス。
                0なら従来どおり路線の端から端まで走る。first_idxより手前の駅は経路に含めない。
+    last_idx: 区間運転の終点（下り）／始点（上り）の駅インデックス。Noneなら路線の最後の駅まで。
+    terminals_stop: Trueなら、区間の両端の駅は、その種別の停車駅でなくても停車扱いにする
+                    （折り返しを行うため、両端では必ず停まる）。
 
     express_times: {(種別名, 停車駅A, 停車駅B): 秒} の形式で、AからBまでの直行所要時分を
                     個別指定できる（急行等が途中駅を通過して普通より速く走る場合に使う）。
@@ -341,7 +345,8 @@ def _compute_stops_for_service(
     """
     express_times = express_times or {}
     n = len(stations)
-    seq = list(range(first_idx, n)) if direction == "Kudari" else list(range(n - 1, first_idx - 1, -1))
+    last = n - 1 if last_idx is None else last_idx
+    seq = list(range(first_idx, last + 1)) if direction == "Kudari" else list(range(last, first_idx - 1, -1))
 
     stops = {}
     t = start_sec
@@ -353,7 +358,7 @@ def _compute_stops_for_service(
             seg_index = min(idx, prev_idx)
             t += run_times_sec[seg_index]
 
-        stops_here = service in station["stops"]
+        stops_here = service in station["stops"] or (terminals_stop and pos in (0, len(seq) - 1))
         if not stops_here:
             stops[idx] = (None, None)
             continue
@@ -1064,6 +1069,185 @@ def _parse_time_to_sec(value):
     return int(h) * 3600 + int(m) * 60 + int(s)
 
 
+# ---------------------------------------------------------------------------
+# 編成（運転士）の数を指定して、折り返しまで時刻が合うダイヤを作る
+# ---------------------------------------------------------------------------
+DEFAULT_TURNBACK_SEC = 5 * 60
+DUTY_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _apportion(count: int, weights: list) -> list:
+    """countを重みに比例して配る（count>=種別数なら各種別に最低1つ）。"""
+    m = len(weights)
+    if count < m:
+        return [1] * count + [0] * (m - count)
+    alloc = [1] * m
+    rest = count - m
+    total = float(sum(weights))
+    quotas = [rest * w / total for w in weights]
+    base = [int(q) for q in quotas]
+    alloc = [a + b for a, b in zip(alloc, base)]
+    left = count - sum(alloc)
+    for i in sorted(range(m), key=lambda i: quotas[i] - base[i], reverse=True)[:left]:
+        alloc[i] += 1
+    return alloc
+
+
+def _allocate_services(group: dict, line_def: dict, first_idx: int, last_idx: int, hint: list = None) -> list:
+    """編成ごとの種別名のリスト（長さ=編成数）を決める。"""
+    count = int(group.get("count") or 0)
+    types = line_def["service_types"]
+    services = group.get("services")
+    if services:
+        alloc = []
+        for name, c in services.items():
+            real = normalize_service_name(name, types)
+            if real is not None:
+                alloc += [real] * int(c)
+        if alloc:
+            while len(alloc) < count:
+                alloc.append(alloc[len(alloc) % len(alloc)])
+            return alloc[:count]
+
+    stations = line_def["stations"][first_idx: last_idx + 1]
+    candidates = hint or types
+    usable = [t for t in candidates if sum(1 for st in stations if t in st["stops"]) >= 2] or list(candidates)
+    if not hint:
+        usable = usable[:4]  # 種別の指定がなければ代表的な4種別まで
+    weights = [2] + [1] * (len(usable) - 1)  # 先頭（各停・普通）は他の種別より多めにする
+    result = []
+    for name, c in zip(usable, _apportion(count, weights)):
+        result += [name] * c
+    return result
+
+
+def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_sec: int, dwell_sec: int):
+    """
+    "formations"（編成数の指定）から、各編成が始発駅→終着駅→折り返し→始発駅…と往復を繰り返す
+    列車を作る。1編成＝1運用番号で、折り返しの時刻（到着＋折り返し時間＝次の発車）が必ず合う。
+    戻り値: (kudari_trains, nobori_trains)。各列車に"duty"（運用番号）が入る。
+
+    formationsは次のいずれか:
+      10                                    … 編成数だけ（全区間・種別は自動で割り振り）
+      {"count": 10, "services": {...}, "turnback_min": 5, "section": {"from": "A", "to": "C"}}
+      [上のグループ, ...]                    … 区間や種別の違う編成を混ぜる（countの合計が編成数）
+    """
+    spec = generate_spec["formations"]
+    groups = [{"count": spec}] if isinstance(spec, int) else ([spec] if isinstance(spec, dict) else list(spec))
+    if not groups:
+        raise ValueError("formationsが空です。")
+
+    stations = line_def["stations"]
+    names = [st["name"] for st in stations]
+    run_times = line_def["run_times_sec"]
+    express = line_def.get("express_times")
+    letters = generate_spec.get("duty_letters") or DUTY_LETTERS
+    hint_services = None
+    hm = generate_spec.get("headway_min")
+    if hm:
+        hint_services = [r for r in (normalize_service_name(k, line_def["service_types"]) for k in hm) if r]
+
+    kudari_all, nobori_all = [], []
+    placed_state = {"Kudari": {}, "Nobori": {}}
+    duty_no = 0
+
+    for group in groups:
+        count = int(group.get("count") or 0)
+        if count < 1:
+            raise ValueError("formationsのcountは1以上にしてください。")
+        section = group.get("section") or {}
+        first_idx = names.index(section["from"]) if section.get("from") else 0
+        if section.get("to"):
+            if section["to"] not in names:
+                raise ValueError(f"formations: 駅「{section['to']}」がこの経路にありません。")
+            last_idx = len(names) - 1 - names[::-1].index(section["to"])
+        else:
+            last_idx = len(names) - 1
+        if section.get("from") and section["from"] not in names:
+            raise ValueError(f"formations: 駅「{section['from']}」がこの経路にありません。")
+        if first_idx >= last_idx:
+            raise ValueError("formations: 区間の始点が終点より前になるようにしてください。")
+        turnback = int(round(float(group.get("turnback_min", DEFAULT_TURNBACK_SEC / 60)) * 60))
+
+        service_per_formation = _allocate_services(group, line_def, first_idx, last_idx, hint_services)
+        # 種別ごとに編成をまとめる（編成の多い種別を先に置く）
+        by_service = {}
+        for name in service_per_formation:
+            by_service[name] = by_service.get(name, 0) + 1
+        order = sorted(by_service, key=lambda n: (-by_service[n], line_def["service_types"].index(n)))
+
+        def compute(service, direction, t):
+            return _compute_stops_for_service(
+                stations, run_times, service, direction, t, dwell_sec, express,
+                first_idx, last_idx, terminals_stop=True,
+            )
+
+        group_trains = []  # (duty_no, service, [(direction, start), ...] を後で作る)
+        formation_plans = []
+        for service in order:
+            k = by_service[service]
+            t_down = compute(service, "Kudari", 0)[last_idx][0]
+            t_up = compute(service, "Nobori", 0)[first_idx][0]
+            cycle = t_down + turnback + t_up + turnback
+
+            def make(delta):
+                plans = []
+                for j in range(k):
+                    d0 = start_sec + delta + int(j * cycle / k)
+                    events = []
+                    for m in range(-3, int((end_sec - start_sec) / cycle) + 3):
+                        ta = d0 + m * cycle
+                        tc = d0 + t_down + turnback + m * cycle
+                        if start_sec <= ta < end_sec:
+                            events.append(("Kudari", ta))
+                        if start_sec <= tc < end_sec:
+                            events.append(("Nobori", tc))
+                    events.sort(key=lambda e: e[1])
+                    plans.append(events)
+                return plans
+
+            def trains_of(plans):
+                out = {"Kudari": [], "Nobori": []}
+                for events in plans:
+                    for direction, t in events:
+                        out[direction].append({"stops": compute(service, direction, t)})
+                return out
+
+            best_plans, best_cost = None, None
+            step = 20
+            for delta in range(0, max(step, int(cycle / k)), step):
+                plans = make(delta)
+                cand = trains_of(plans)
+                c1 = _spacing_cost(placed_state["Kudari"], cand["Kudari"]) if placed_state["Kudari"] else (0, 0)
+                c2 = _spacing_cost(placed_state["Nobori"], cand["Nobori"]) if placed_state["Nobori"] else (0, 0)
+                cost = (c1[0] + c2[0], max(c1[1], c2[1]))
+                if best_cost is None or cost < best_cost:
+                    best_cost, best_plans = cost, plans
+                if best_cost == (0, 0) and not placed_state["Kudari"]:
+                    break
+            for events in best_plans:
+                formation_plans.append((service, events))
+            chosen = trains_of(best_plans)
+            _place_trains(placed_state["Kudari"], chosen["Kudari"])
+            _place_trains(placed_state["Nobori"], chosen["Nobori"])
+
+        for service, events in formation_plans:
+            duty_no += 1
+            duty = f"{duty_no:02d}{letters[(duty_no - 1) % len(letters)]}"
+            service_index = line_def["service_types"].index(service)
+            for seq, (direction, t) in enumerate(events, start=1):
+                train = {
+                    "service_index": service_index,
+                    "train_number": f"{duty}-{seq:02d}",
+                    "stops": compute(service, direction, t),
+                    "start_sec": t,
+                    "duty": duty,
+                }
+                (kudari_all if direction == "Kudari" else nobori_all).append(train)
+
+    return kudari_all, nobori_all
+
+
 def _headways_from_min(headway_min: dict, line_def: dict):
     """{種別名: 分} を {その路線の種別名: 秒} に直す。戻り値: (headways, 走らせる種別の集合)"""
     headways = {}
@@ -1090,6 +1274,10 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
     start_sec = int(float(generate_spec.get("start_hour", 6)) * 3600)
     end_sec = int(float(generate_spec.get("end_hour", 24)) * 3600)
     dwell_sec = int(generate_spec.get("dwell_sec", DEFAULT_DWELL_SEC))
+
+    if generate_spec.get("formations"):
+        # 編成（運転士）の数を指定された場合は、折り返しまで合う編成運用のダイヤを作る
+        return _expand_formations(generate_spec, line_def, start_sec, end_sec, dwell_sec)
 
     common = dict(
         stations=line_def["stations"],
