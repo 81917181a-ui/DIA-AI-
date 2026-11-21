@@ -1121,6 +1121,150 @@ def _allocate_services(group: dict, line_def: dict, first_idx: int, last_idx: in
     return result
 
 
+import re as _re
+
+REFUGE_HOLD_MARGIN_SEC = 40   # 優等列車が出たあと、待避した列車が出るまでの秒数
+REFUGE_MAX_HOLD_SEC = 600     # 1回の待避で止めてよい最大秒数
+REFUGE_WINDOW_SEC = 900       # この秒数以内に追いつかれそうな列車だけ待避の対象にする
+
+
+def _refuge_stations(line_def: dict) -> set:
+    """待避ができる駅（4線以上・待避線あり・通過線ありの駅）のインデックス集合。"""
+    result = set()
+    for i, st in enumerate(line_def["stations"]):
+        fac = str(st.get("facilities") or "")
+        m = _re.search(r"(\d+)線", fac)
+        lines = int(m.group(1)) if m else 0
+        if lines >= 4 or "待避線" in fac or "退避線" in fac or "通過線" in fac:
+            result.add(i)
+    return result
+
+
+def _train_timeline(stops: dict, direction: str, run_times: list) -> dict:
+    """{駅: [着, 発]}。通過駅は前後の停車駅の時刻から駅間所要時分で按分した通過時刻を入れる。"""
+    idxs = sorted(stops, reverse=(direction == "Nobori"))
+    known = []
+    for pos, i in enumerate(idxs):
+        arr, dep = stops[i]
+        if arr is not None or dep is not None:
+            known.append((pos, arr if arr is not None else dep, dep if dep is not None else arr))
+    tl = {}
+    for (p1, _a1, d1), (p2, a2, _d2) in zip(known, known[1:]):
+        segs = [run_times[min(idxs[k], idxs[k + 1])] for k in range(p1, p2)]
+        total = float(sum(segs)) or 1.0
+        acc = 0.0
+        for k in range(p1 + 1, p2):
+            acc += segs[k - 1 - p1]
+            t = d1 + (a2 - d1) * acc / total
+            tl[idxs[k]] = [t, t]
+    for pos, a, d in known:
+        tl[idxs[pos]] = [a, d]
+    return tl
+
+
+def _shift_train(train: dict, delta: int, from_idx=None, direction: str = "Kudari"):
+    """from_idxより先（進行方向）の駅の時刻をdelta秒遅らせる。from_idx=Noneなら全体。"""
+    order = sorted(train["stops"], reverse=(direction == "Nobori"))
+    started = from_idx is None
+    for i in order:
+        if not started:
+            if i == from_idx:
+                started = True
+            continue
+        arr, dep = train["stops"][i]
+        train["stops"][i] = (None if arr is None else arr + delta, None if dep is None else dep + delta)
+    if from_idx is None and "start_sec" in train:
+        train["start_sec"] += delta
+
+
+def _train_first_last(train: dict, direction: str):
+    order = sorted([i for i, v in train["stops"].items() if v != (None, None)], reverse=(direction == "Nobori"))
+    return order[0], order[-1]
+
+
+def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
+    """
+    待避を反映する。各停・準急などが、4線以上などの待避ができる駅で、後ろから来る
+    優等列車（停車駅の少ない列車）に追い越されるとき、その駅で優等列車を先に行かせてから発車する。
+    待避で遅れた分は、その列車以降の時刻と、同じ運用の次の列車（折り返し）にも反映する。
+    戻り値: 待避させた回数。
+    """
+    refuge = _refuge_stations(line_def)
+    if not refuge:
+        return 0
+    run_times = line_def["run_times_sec"]
+    count = 0
+    by_dir = {"Kudari": kudari, "Nobori": nobori}
+
+    for _ in range(60):
+        changed = False
+        for direction, trains in by_dir.items():
+            if len(trains) < 2:
+                continue
+            tls = {id(t): _train_timeline(t["stops"], direction, run_times) for t in trains}
+            nstops = {id(t): sum(1 for v in t["stops"].values() if v != (None, None)) for t in trains}
+            done = False
+            for s in sorted(trains, key=lambda t: t.get("start_sec", 0)):
+                tl_s = tls[id(s)]
+                order_s = sorted(s["stops"], reverse=(direction == "Nobori"))
+                for i in order_s[1:-1]:
+                    arr_s, dep_s = s["stops"][i]
+                    if i not in refuge or arr_s is None or dep_s is None:
+                        continue
+                    for f in trains:
+                        if f is s or nstops[id(f)] >= nstops[id(s)]:
+                            continue
+                        tl_f = tls[id(f)]
+                        if i not in tl_f:
+                            continue
+                        f_arr, f_dep = tl_f[i]
+                        if f_arr < arr_s - 20 or f_arr - arr_s > REFUGE_WINDOW_SEC:
+                            continue
+                        after = [k for k in order_s if (k > i if direction == "Kudari" else k < i)]
+                        nxt = next((k for k in after if k in refuge and k in tl_f), None)
+                        if nxt is None:
+                            nxt = next((k for k in reversed(after) if k in tl_f), None)
+                        if nxt is None:
+                            continue
+                        if tl_f[nxt][0] >= tl_s[nxt][0] + 30:
+                            continue  # fは次の待避駅までに追いつかない
+                        new_dep = int(f_dep + REFUGE_HOLD_MARGIN_SEC)
+                        delta = new_dep - dep_s
+                        if delta <= 0 or delta > REFUGE_MAX_HOLD_SEC:
+                            continue
+                        _shift_train(s, delta, from_idx=i, direction=direction)
+                        s["stops"][i] = (arr_s, dep_s + delta)
+                        count += 1
+                        changed = done = True
+                        break
+                    if done:
+                        break
+                if done:
+                    break
+        # 同じ運用の次の列車（折り返し）が、遅れた到着より前に出ないようにする
+        chains = {}
+        for direction, trains in by_dir.items():
+            for t in trains:
+                if t.get("duty"):
+                    chains.setdefault(t["duty"], []).append((direction, t))
+        for duty, items in chains.items():
+            items.sort(key=lambda x: x[1].get("start_sec", 0))
+            for (d1, a), (d2, b) in zip(items, items[1:]):
+                _f1, l1 = _train_first_last(a, d1)
+                f2, _l2 = _train_first_last(b, d2)
+                arr_end = a["stops"][l1][0]
+                dep_start = b["stops"][f2][1]
+                if arr_end is None or dep_start is None:
+                    continue
+                need = arr_end + int(b.get("turn_sec", 60))
+                if dep_start < need:
+                    _shift_train(b, need - dep_start, None, d2)
+                    changed = True
+        if not changed:
+            break
+    return count
+
+
 def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_sec: int, dwell_sec: int):
     """
     "formations"（編成数の指定）から、各編成が始発駅→終着駅→折り返し→始発駅…と往復を繰り返す
@@ -1231,7 +1375,7 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
                     kudari_all.append({
                         "service_index": line_def["service_types"].index(service),
                         "train_number": f"{duty}-{seq:02d}",
-                        "stops": stops_, "start_sec": t, "duty": duty,
+                        "stops": stops_, "start_sec": t, "duty": duty, "turn_sec": loop_turn,
                     })
             continue
 
@@ -1318,12 +1462,12 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
                 if best_cost == (0, 0) and not placed_state["Kudari"]:
                     break
             for events in best_plans:
-                formation_plans.append((service, events))
+                formation_plans.append((service, events, tb))
             chosen = trains_of(best_plans)
             _place_trains(placed_state["Kudari"], chosen["Kudari"])
             _place_trains(placed_state["Nobori"], chosen["Nobori"])
 
-        for service, events in formation_plans:
+        for service, events, tb_used in formation_plans:
             duty_no += 1
             duty = f"{duty_no:02d}{letters[(duty_no - 1) % len(letters)]}"
             service_index = line_def["service_types"].index(service)
@@ -1334,9 +1478,12 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
                     "stops": compute(service, direction, t),
                     "start_sec": t,
                     "duty": duty,
+                    "turn_sec": tb_used,
                 }
                 (kudari_all if direction == "Kudari" else nobori_all).append(train)
 
+    if generate_spec.get("refuge", True):
+        _apply_refuge(kudari_all, nobori_all, line_def)
     return kudari_all, nobori_all
 
 
