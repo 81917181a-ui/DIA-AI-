@@ -210,8 +210,23 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
     尾羽原〜井口の支線の列車だけで、環状を周回する列車ではない。
   - 途中駅で折り返してよいのは、ユーザーが「途中折り返しあり」と言い、その駅に折り返し設備がある場合だけ。
     その場合も、井口は折り返し駅にしないこと。
-  - 環状・周回のダイヤでは、"formations"（往復して折り返す方式）は使わない。書き方2（headway_min）と
-    "origins"で作り、運用番号が指定されていれば列車ごとに"duty"を付けて、周回する同じ編成に同じ運用番号を使う。
+  - 環状・周回のダイヤで編成（運転士）の数が指定されたら、書き方3の"formations"を配列にして、
+    次の3種類のグループを組み合わせる（countの合計＝編成数）。列車は1本ずつ書かず、必ずプログラムに作らせること。
+    1) 周回する編成（全線爆走）: {{"count": n, "loop": true, "start": ["尾羽原", "安越"], "services": {{...}}}}
+       startは始発駅（交互に割り当てられる）。折り返さずに環状を周回し続ける。
+    2) 途中で折り返す編成（区間運転）: {{"count": n, "section": {{"from": "安越", "to": "千鳥"}}, "services": {{...}}}}
+       fromとtoの間を往復して折り返す。「一部列車は千鳥折り返し」と言われたらこれを使う（井口は折り返し駅にしない）。
+    3) 尾羽原の支線の編成: {{"count": n, "section": {{"from": "尾羽原", "to": "井口"}}, "cycle_min": <間隔×n>,
+       "services": {{"各停": 1, "準急": 1}}}} 。尾羽原発の間隔を約17分にしたいなら、n=1ならcycle_min=17、n=2なら34。
+    そのうえで、"start_hour": 15, "end_hour": 16.5, "start_by_min": 15（運転開始から15分以内に全列車が
+    始発駅から運行開始する。「15:15までに全列車運行開始」と言われたらこの値にする）を指定すること。
+    始発駅の指定（尾羽原か安越）はloop/sectionのstart/fromで守られる。
+    例: {{"line_key": "through", "route": [...], "generate": {{"start_hour": 15, "end_hour": 16.5, "start_by_min": 15,
+    "formations": [{{"count": 1, "cycle_min": 17, "services": {{"各停": 1}}, "section": {{"from": "尾羽原", "to": "井口"}}}},
+    {{"count": 3, "section": {{"from": "安越", "to": "千鳥"}}}}, {{"count": 6, "loop": true, "start": ["尾羽原", "安越"]}}]}}}}
+  - 時刻の指定（「15:15までに始発」など）はstart_by_minやstart_hourで必ず守ること。無視しないこと。
+  - 返信が長くなって、最後のDIA_JSONが途中で切れないように、環状・編成指定のダイヤでは
+    Markdownの表は代表的な数本（5行程度）に絞り、先にDIA_JSONブロックを完成させること。
   - 時刻表の本文でも、井口で折り返す列車や、井口2回目到着後に上井口方面へ戻る列車を書かないこと。
 
   - stopsの駅名は、routeでつなげた経路の駅名と完全に一致させること。
@@ -456,6 +471,23 @@ def is_oud2_export_request(user_input: str) -> bool:
         ("oud2" in lowered) or ("oudia" in lowered) or ("ウーディア" in user_input)
         or any(w in user_input for w in ("おうでぃあ", "オウディア", "オーディア", "おーでぃあ"))
     )
+
+
+DIA_REQUEST_HINTS = (
+    "運転区間", "運転時間帯", "運転士", "編成", "種別", "待避", "接続設定", "運用番号",
+    "始発", "折り返し", "折返し", "環状", "直通", "間隔", "作成難易度", "〜", "~",
+)
+
+
+def is_all_lines_oud2_request(user_input: str) -> bool:
+    """「全部の路線をoud2に」のような全路線一括の依頼か。
+    「尾羽急本線（全線）」のように区間の説明に「全線」が入っているだけの、
+    具体的なダイヤの依頼（条件が書かれた長い依頼）は全路線一括とみなさない。"""
+    if not any(w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")):
+        return False
+    if len(user_input) > 80 or sum(1 for w in DIA_REQUEST_HINTS if w in user_input) >= 2:
+        return False
+    return True
 
 
 INDIVIDUAL_WORDS = (
@@ -1105,8 +1137,8 @@ def main():
         rename_target = try_extract_rename_request(user_input)
         oud2_request = is_oud2_export_request(user_input)
         oud2_individual = oud2_request and is_individual_oud2_request(user_input)
-        oud2_all_lines = oud2_request and not oud2_individual and any(
-            w in user_input for w in ("全部", "全路線", "すべて", "全線", "全て")
+        oud2_all_lines = (
+            oud2_request and not oud2_individual and is_all_lines_oud2_request(user_input)
         )
         untenkeikaku_request = is_untenkeikaku_request(user_input)
         untenhyou_request = is_untenhyou_request(user_input)
