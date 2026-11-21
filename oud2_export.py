@@ -1128,15 +1128,26 @@ REFUGE_MAX_HOLD_SEC = 600     # 1回の待避で止めてよい最大秒数
 REFUGE_WINDOW_SEC = 900       # この秒数以内に追いつかれそうな列車だけ待避の対象にする
 
 
-def _refuge_stations(line_def: dict) -> set:
-    """待避ができる駅（4線以上・待避線あり・通過線ありの駅）のインデックス集合。"""
-    result = set()
+def _refuge_stations(line_def: dict) -> dict:
+    """
+    待避ができる駅の {駅インデックス: {待避できる方向}} を、駅データ（設備の説明）から読み取る。
+      ・「尾羽原方面に待避（退避）線あり」→ 尾羽原方面（上り）の列車だけ待避できる
+      ・「両方面に待避線あり」「通過線あり」「中2線は停車専用」「尾羽急本線と同じ構造」、または4線以上
+        → 上り・下りの両方で待避できる
+      ・それ以外（2線・3線など）は待避できない
+    """
+    result = {}
+    both = {"Kudari", "Nobori"}
     for i, st in enumerate(line_def["stations"]):
         fac = str(st.get("facilities") or "")
+        if _re.search(r"尾羽原方面に(待避|退避)線", fac):
+            result[i] = {"Nobori"}
+            continue
         m = _re.search(r"(\d+)線", fac)
         lines = int(m.group(1)) if m else 0
-        if lines >= 4 or "待避線" in fac or "退避線" in fac or "通過線" in fac:
-            result.add(i)
+        if (lines >= 4 or "両方面に待避線" in fac or "両方面に退避線" in fac or "通過線" in fac
+                or "停車専用" in fac or "同じ構造" in fac):
+            result[i] = set(both)
     return result
 
 
@@ -1209,7 +1220,7 @@ def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
                 order_s = sorted(s["stops"], reverse=(direction == "Nobori"))
                 for i in order_s[1:-1]:
                     arr_s, dep_s = s["stops"][i]
-                    if i not in refuge or arr_s is None or dep_s is None:
+                    if direction not in refuge.get(i, ()) or arr_s is None or dep_s is None:
                         continue
                     for f in trains:
                         if f is s or nstops[id(f)] >= nstops[id(s)]:
@@ -1221,7 +1232,7 @@ def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
                         if f_arr < arr_s - 20 or f_arr - arr_s > REFUGE_WINDOW_SEC:
                             continue
                         after = [k for k in order_s if (k > i if direction == "Kudari" else k < i)]
-                        nxt = next((k for k in after if k in refuge and k in tl_f), None)
+                        nxt = next((k for k in after if direction in refuge.get(k, ()) and k in tl_f), None)
                         if nxt is None:
                             nxt = next((k for k in reversed(after) if k in tl_f), None)
                         if nxt is None:
