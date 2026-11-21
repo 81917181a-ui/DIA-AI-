@@ -224,6 +224,15 @@ SYSTEM_PROMPT_TEMPLATE = """あなたは「鉄道ダイヤ作成専門AI」で�
     例: {{"line_key": "through", "route": [...], "generate": {{"start_hour": 15, "end_hour": 16.5, "start_by_min": 15,
     "formations": [{{"count": 1, "cycle_min": 17, "services": {{"各停": 1}}, "section": {{"from": "尾羽原", "to": "井口"}}}},
     {{"count": 3, "section": {{"from": "安越", "to": "千鳥"}}}}, {{"count": 6, "loop": true, "start": ["尾羽原", "安越"]}}]}}}}
+  - 「尾羽原と千鳥を往復」「尾羽原〜千鳥を行ったり来たり」と言われたら、sectionは from=尾羽原, to=千鳥
+    （本線の全区間。途中の駅も通る）にすること。尾羽原〜井口の1区間だけにしてはならない。
+    尾羽原〜井口の短い区間になるのは、ユーザーが「尾羽原〜井口の支線」とはっきり言ったときだけ。
+  - 「N編成が安越を出て…周回」はloop（start: ["安越"], count: N）、
+    「N編成が尾羽原から安越方面へ進んで周回」はloop（start: ["尾羽原"], count: N）にする。
+    編成の内訳が書かれていたら、その数と種別をそのままgroupにする（countの合計＝全体の編成数）。
+    例:「安越出発の周回4＋尾羽原出発の周回4＋尾羽原〜千鳥往復2（準急・急行）」なら
+    "formations": [{{"count": 4, "loop": true, "start": ["安越"]}}, {{"count": 4, "loop": true, "start": ["尾羽原"]}},
+    {{"count": 2, "services": {{"準急": 1, "急行": 1}}, "section": {{"from": "尾羽原", "to": "千鳥"}}}}]。
   - 時刻の指定（「15:15までに始発」など）はstart_by_minやstart_hourで必ず守ること。無視しないこと。
   - 返信が長くなって、最後のDIA_JSONが途中で切れないように、環状・編成指定のダイヤでは
     Markdownの表は代表的な数本（5行程度）に絞り、先にDIA_JSONブロックを完成させること。
