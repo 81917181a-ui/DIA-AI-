@@ -392,6 +392,72 @@ def _infos_from_internal_trains(line_def: dict, kudari_trains: list, nobori_trai
     return infos
 
 
+def _annotate_refuge_notes(line_def: dict, infos: list) -> None:
+    """
+    運転表の「通過待ち等」の欄に、待避（通過待ち・追い越し待ち）の内容を書き込む。
+    待避する列車の駅には「準急(02B-01)通過待ち」のように、追い越す列車の通過駅には
+    「通過（各停 01A-01を追い越し）」のように入れる。
+    """
+    from oud2_export import _refuge_stations, _train_timeline
+
+    refuge = _refuge_stations(line_def)
+    run_times = line_def["run_times_sec"]
+    n = len(line_def["stations"])
+    by_dir = {"Kudari": [], "Nobori": []}
+    for info in infos:
+        if info.get("internal") is not None:
+            by_dir[info["direction"]].append(info)
+
+    for direction, group in by_dir.items():
+        tls = {id(i): _train_timeline(i["internal"]["stops"], direction, run_times) for i in group}
+        order = list(range(n)) if direction == "Kudari" else list(range(n - 1, -1, -1))
+        notes = {}  # (id(info), idx) -> [文字列]
+
+        def count_stops(t, lo, hi):
+            return sum(1 for k, v in t["stops"].items() if lo <= k <= hi and v != (None, None))
+
+        for s_info in group:
+            s_t = s_info["internal"]
+            for idx, (arr, dep) in s_t["stops"].items():
+                if arr is None or dep is None or direction not in refuge.get(idx, ()):
+                    continue
+                if dep - arr < 60:
+                    continue
+                for f_info in group:
+                    if f_info is s_info:
+                        continue
+                    f_t = f_info["internal"]
+                    tl_f = tls[id(f_info)]
+                    if idx not in tl_f:
+                        continue
+                    lo = max(min(s_t["stops"]), min(f_t["stops"]))
+                    hi = min(max(s_t["stops"]), max(f_t["stops"]))
+                    if lo >= hi or count_stops(f_t, lo, hi) >= count_stops(s_t, lo, hi):
+                        continue
+                    f_arr, f_dep = tl_f[idx]
+                    if not (arr - 30 <= f_arr <= dep):
+                        continue
+                    passes = f_t["stops"][idx] == (None, None)
+                    f_label = f"{f_info['service']}({f_info['train_number']})"
+                    s_label = f"{s_info['service']} {s_info['train_number']}"
+                    notes.setdefault((id(s_info), idx), []).append(
+                        f"{f_label}{'通過待ち' if passes else '追い越し待ち'}"
+                    )
+                    if passes:
+                        notes.setdefault((id(f_info), idx), []).append(f"{s_label}を追い越し")
+
+        for info in group:
+            idxs = [i for i in order if i in info["internal"]["stops"]]
+            new_rows = []
+            for k, row in enumerate(info["rows"]):
+                name, arr, dep, note = row
+                extra = notes.get((id(info), idxs[k])) if k < len(idxs) else None
+                if extra:
+                    note = (note + " " if note else "") + "、".join(extra) if note != "通過" else "通過（" + "、".join(extra) + "）"
+                new_rows.append((name, arr, dep, note))
+            info["rows"] = new_rows
+
+
 def assign_formations(infos: list, min_turnback_sec: int = 180):
     """
     編成（運用）ごとの列車グループを返す。全列車に運用番号（"duty"）が付いていれば、その運用番号で
@@ -455,6 +521,10 @@ def build_untenhyou_html(custom_dia: dict, time_unit: str = "sec", min_turnback_
     if custom_dia.get("generate"):
         kudari_trains, nobori_trains = expand_generate_spec(custom_dia["generate"], line_def)
         infos = _infos_from_internal_trains(line_def, kudari_trains, nobori_trains)
+        try:
+            _annotate_refuge_notes(line_def, infos)
+        except Exception:
+            pass  # 備考の追加に失敗しても、運転表そのものは出す
         formations = assign_formations(infos, min_turnback_sec=min_turnback_sec)
         return _render_untenhyou_html(formations, time_unit), len(formations), len(infos)
 
