@@ -1207,15 +1207,15 @@ def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
     count = 0
     by_dir = {"Kudari": kudari, "Nobori": nobori}
 
-    for _ in range(60):
+    for _ in range(300):
         changed = False
         for direction, trains in by_dir.items():
             if len(trains) < 2:
                 continue
             tls = {id(t): _train_timeline(t["stops"], direction, run_times) for t in trains}
             nstops = {id(t): sum(1 for v in t["stops"].values() if v != (None, None)) for t in trains}
-            done = False
             for s in sorted(trains, key=lambda t: t.get("start_sec", 0)):
+                done = False
                 tl_s = tls[id(s)]
                 order_s = sorted(s["stops"], reverse=(direction == "Nobori"))
                 for i in order_s[1:-1]:
@@ -1261,7 +1261,8 @@ def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
                     if done:
                         break
                 if done:
-                    break
+                    # 時刻が変わったので、この列車の通過時刻を取り直して次の列車へ
+                    tls[id(s)] = _train_timeline(s["stops"], direction, run_times)
         # 同じ運用の次の列車（折り返し）が、遅れた到着より前に出ないようにする
         chains = {}
         for direction, trains in by_dir.items():
@@ -1597,7 +1598,10 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
     origins = generate_spec.get("origins")
     if not origins:
         headways, active = _headways_from_min(generate_spec.get("headway_min"), line_def)
-        return build_full_day_trains(headways=headways or None, active_services=active, **common)
+        k, n = build_full_day_trains(headways=headways or None, active_services=active, **common)
+        if generate_spec.get("refuge", True):
+            _apply_refuge(k, n, line_def)
+        return k, n
 
     names = [st["name"] for st in line_def["stations"]]
     kudari_all, nobori_all = [], []
@@ -1618,6 +1622,8 @@ def expand_generate_spec(generate_spec: dict, line_def: dict):
         )
         kudari_all.extend(k)
         nobori_all.extend(n)
+    if generate_spec.get("refuge", True):
+        _apply_refuge(kudari_all, nobori_all, line_def)
     return kudari_all, nobori_all
 
 
