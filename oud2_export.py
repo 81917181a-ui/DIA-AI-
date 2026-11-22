@@ -1307,6 +1307,12 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
     run_times = line_def["run_times_sec"]
     express = line_def.get("express_times")
     letters = generate_spec.get("duty_letters") or DUTY_LETTERS
+    # 「16:30前後」のような指定は±15分（end_tolerance_minで変更可）。終了は主要駅で。
+    limit_sec = end_sec + int(float(generate_spec.get("end_tolerance_min", 15)) * 60)
+    major = {
+        i for i, st in enumerate(stations)
+        if "急行" in st["stops"] or "快速急行" in st["stops"]
+    }
     hint_services = None
     hm = generate_spec.get("headway_min")
     if hm:
@@ -1371,6 +1377,23 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
                         stations, run_times, service, "Kudari", t, dwell_sec, express,
                         fi, last_idx, terminals_stop=True,
                     )
+                    if stops_[last_idx][0] > limit_sec:
+                        # 終了時刻（前後の許容を含む）までに周回し終えられないときは、
+                        # 間に合う最後の主要駅（急行・快速急行が停まる駅）で運転を終える
+                        cut = None
+                        for m_idx in range(last_idx - 1, fi, -1):
+                            if m_idx not in major:
+                                continue
+                            tr = _compute_stops_for_service(
+                                stations, run_times, service, "Kudari", t, dwell_sec, express,
+                                fi, m_idx, terminals_stop=True,
+                            )
+                            if tr[m_idx][0] <= limit_sec:
+                                cut = tr
+                                break
+                        if cut is not None:
+                            events.append((t, fi, cut))
+                        break
                     events.append((t, fi, stops_))
                     t = stops_[last_idx][0] + loop_turn
                     fi = lap_idx
@@ -1454,9 +1477,9 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
                     for m in range(m_lo, int((end_sec - start_sec) / cycle) + 3):
                         ta = d0 + m * cycle
                         tc = d0 + t_down + tb + m * cycle
-                        if start_sec <= ta < end_sec:
+                        if start_sec <= ta < end_sec and ta + t_down <= limit_sec:
                             events.append(("Kudari", ta))
-                        if start_sec <= tc < end_sec:
+                        if start_sec <= tc < end_sec and tc + t_up <= limit_sec:
                             events.append(("Nobori", tc))
                     events.sort(key=lambda e: e[1])
                     plans.append(events)
@@ -1505,6 +1528,27 @@ def _expand_formations(generate_spec: dict, line_def: dict, start_sec: int, end_
 
     if generate_spec.get("refuge", True):
         _apply_refuge(kudari_all, nobori_all, line_def)
+    # 待避で遅れて終了時刻の許容（±）を超える列車は、間に合う最後の主要駅で運転を終える
+    for direction, trains in (("Kudari", kudari_all), ("Nobori", nobori_all)):
+        for t in list(trains):
+            order = sorted([i for i, v in t["stops"].items() if v != (None, None)],
+                           reverse=(direction == "Nobori"))
+            last_arr = t["stops"][order[-1]][0]
+            if last_arr is None or last_arr <= limit_sec:
+                continue
+            keep = None
+            for i in reversed(order[1:-1]):
+                arr = t["stops"][i][0]
+                if arr is not None and arr <= limit_sec and (i in major):
+                    keep = i
+                    break
+            if keep is None:
+                trains.remove(t)
+                continue
+            for i in list(t["stops"]):
+                if (i > keep) if direction == "Kudari" else (i < keep):
+                    del t["stops"][i]
+            t["stops"][keep] = (t["stops"][keep][0], None)
     return kudari_all, nobori_all
 
 
