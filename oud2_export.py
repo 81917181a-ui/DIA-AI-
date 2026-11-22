@@ -1223,7 +1223,17 @@ def _apply_refuge(kudari: list, nobori: list, line_def: dict) -> int:
                     if direction not in refuge.get(i, ()) or arr_s is None or dep_s is None:
                         continue
                     for f in trains:
-                        if f is s or nstops[id(f)] >= nstops[id(s)]:
+                        if f is s:
+                            continue
+                        # 2本が共通して走る区間での停車駅数を比べる（走る区間の長さの違いで
+                        # 同じ種別どうしが待避し合わないように）
+                        lo = max(min(s["stops"]), min(f["stops"]))
+                        hi = min(max(s["stops"]), max(f["stops"]))
+                        if lo >= hi:
+                            continue
+                        n_s = sum(1 for k, v in s["stops"].items() if lo <= k <= hi and v != (None, None))
+                        n_f = sum(1 for k, v in f["stops"].items() if lo <= k <= hi and v != (None, None))
+                        if n_f >= n_s:
                             continue
                         tl_f = tls[id(f)]
                         if i not in tl_f:
