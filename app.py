@@ -26,6 +26,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 from stations_data import build_line_context_text, SERVICE_TYPES, STATIONS
+from discord_auth import require_login, render_account_sidebar, user_label as auth_user_label
 from oud2_export import (
     build_sample_oud2,
     build_all_lines_zip,
@@ -701,10 +702,10 @@ def get_client_ip() -> str:
     return (headers.get("X-Real-IP") or "").strip() or "不明"
 
 
-def log_access(session_id: str):
-    """アクセス（ブラウザでページを開いた）ごとに、時刻（日本時間）とIPをRenderのLogsに残す。"""
+def log_access(session_id: str, user: str = ""):
+    """アクセス（ブラウザでページを開いた）ごとに、時刻（日本時間）・IP・Discordユーザーを、RenderのLogsに残す。"""
     print(
-        f"[access] {now_jst_str()} ip={get_client_ip()} sid={session_id}",
+        f"[access] {now_jst_str()} ip={get_client_ip()} sid={session_id} user={user or '-'}",
         flush=True,
     )
 
@@ -730,7 +731,7 @@ def _post_webhook(url: str, content: str):
         print(f"[question] ウェブフックへの送信に失敗しました: {type(e).__name__}: {e}", flush=True)
 
 
-def send_question_webhook_async(question: str, ip: str, session_id: str):
+def send_question_webhook_async(question: str, ip: str, session_id: str, user: str = ""):
     """質問が送られるたびに、時刻（日本時間）・IPとともにウェブフックへ送る。画面は待たせない。"""
     if not QUESTION_WEBHOOK_URL:
         print("[question] ウェブフックのURLが未設定のため、質問は送っていません", flush=True)
@@ -740,6 +741,7 @@ def send_question_webhook_async(question: str, ip: str, session_id: str):
         body = body[:1500] + "…（以下省略）"
     content = (
         f"💬 **質問** {now_jst_str()}\n"
+        f"ユーザー: {user or '-'}\n"
         f"IP: `{ip}` / セッション: `{session_id[:8]}`\n"
         f"```\n{body}\n```"
     )
@@ -933,10 +935,15 @@ def main():
         session_id = str(uuid.uuid4())
         st.query_params["sid"] = session_id
 
+    # --- Discordログイン：許可されたユーザーだけ通す（それ以外はログイン画面だけ表示）---
+    auth_user = require_login(db, session_id, get_client_ip())
+    if auth_user is None:
+        return
+
     # アクセスログ：ページを開いた（新しいブラウザセッションの）ときに1回だけ残す
     if not st.session_state.get("access_logged"):
         st.session_state["access_logged"] = True
-        log_access(session_id)
+        log_access(session_id, auth_user_label(auth_user))
 
     if "session_expires_at" not in st.session_state:
         _, st.session_state["session_expires_at"] = ensure_session(db, session_id)
@@ -970,6 +977,7 @@ def main():
         st.session_state["deleting_conversation_id"] = None
 
     with st.sidebar:
+        render_account_sidebar(db, auth_user, session_id)
         if st.button("＋ 新しいチャット"):
             st.session_state["current_conversation_id"] = None
             st.session_state["editing_conversation_id"] = None
@@ -1131,7 +1139,7 @@ def main():
 
     if user_input:
         # 質問が送られるたびに、ウェブフック（Renderの環境変数）へ送る
-        send_question_webhook_async(user_input, get_client_ip(), session_id)
+        send_question_webhook_async(user_input, get_client_ip(), session_id, auth_user_label(auth_user))
 
         # ドラフト状態（新規チャット）なら、ここで初めてFirestoreにチャットを作成する
         is_new_conversation = current_id is None
