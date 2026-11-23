@@ -940,15 +940,19 @@ def main():
     if auth_user is None:
         return
 
+    # チャット履歴の持ち主：ログイン中はDiscordのIDで分ける（別のアカウントの履歴は見えない・
+    # 端末が変わっても同じアカウントなら同じ履歴）。認証を使わない設定のときだけsidで分ける。
+    data_key = f"discord_{auth_user['id']}" if auth_user.get("id") else session_id
+
     # アクセスログ：ページを開いた（新しいブラウザセッションの）ときに1回だけ残す
     if not st.session_state.get("access_logged"):
         st.session_state["access_logged"] = True
         log_access(session_id, auth_user_label(auth_user))
 
     if "session_expires_at" not in st.session_state:
-        _, st.session_state["session_expires_at"] = ensure_session(db, session_id)
+        _, st.session_state["session_expires_at"] = ensure_session(db, data_key)
     session_expires_at = st.session_state["session_expires_at"]
-    conversations = get_conversations_cached(db, session_id)
+    conversations = get_conversations_cached(db, data_key)
 
     # 現在選択中のチャット：
     # ・まだ何もない場合や「＋新しいチャット」直後は current_conversation_id = None（ドラフト状態）
@@ -1144,7 +1148,7 @@ def main():
         # ドラフト状態（新規チャット）なら、ここで初めてFirestoreにチャットを作成する
         is_new_conversation = current_id is None
         if is_new_conversation:
-            current_id = create_conversation(db, session_id, session_expires_at)
+            current_id = create_conversation(db, data_key, session_expires_at)
             st.session_state["current_conversation_id"] = current_id
             invalidate_conversations_cache()
             messages = []
