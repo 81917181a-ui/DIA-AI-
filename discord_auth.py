@@ -59,6 +59,7 @@ def _parse_ids(text: str) -> list:
     return ids
 
 
+BIND_IP = os.environ.get("AUTH_BIND_IP", "1").strip().lower() not in ("0", "false", "no", "off")
 ADMIN_IDS = _parse_ids(os.environ.get("ADMIN_DISCORD_IDS", ""))
 INITIAL_ALLOWED_IDS = _parse_ids(os.environ.get("ALLOWED_DISCORD_IDS", ""))
 
@@ -251,10 +252,22 @@ def remove_allowed(db, discord_id: str):
 # ---------------------------------------------------------------------------
 # ログイン状態の保存（ブラウザを再読み込みしても、同じsidなら期限内はログインしたまま）
 # ---------------------------------------------------------------------------
-def _save_login(db, session_id: str, user: dict):
+def _device_fingerprint() -> str:
+    """ブラウザの種類（User-Agent）と言語から、端末の目印（ハッシュ）を作る。"""
+    try:
+        headers = st.context.headers
+        raw = (headers.get("User-Agent", "") or "") + "|" + (headers.get("Accept-Language", "") or "")
+    except Exception:
+        raw = ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _save_login(db, session_id: str, user: dict, ip: str = ""):
     now = datetime.now(timezone.utc)
     db.collection(AUTH_COLLECTION).document(session_id).set(
         {
+            "device": _device_fingerprint(),
+            "ip": str(ip or ""),
             "discord_id": user["id"],
             "username": user["username"],
             "display": user["display"],
@@ -264,7 +277,7 @@ def _save_login(db, session_id: str, user: dict):
     )
 
 
-def _load_login(db, session_id: str):
+def _load_login(db, session_id: str, ip: str = ""):
     try:
         doc = db.collection(AUTH_COLLECTION).document(session_id).get()
         if not doc.exists:
@@ -272,6 +285,24 @@ def _load_login(db, session_id: str):
         data = doc.to_dict() or {}
         expires = data.get("expires_at")
         if expires is not None and expires < datetime.now(timezone.utc):
+            return None
+        # 別の端末（ブラウザの種類やIPが違う）から同じURLで来た場合は、ログイン済みとして扱わない。
+        # URLを人に送っても、その人はログインできない（Discordでの認証が必要）。
+        saved_device = data.get("device")
+        saved_ip = data.get("ip", "")
+        mismatch = ""
+        if saved_device and saved_device != _device_fingerprint():
+            mismatch = "ブラウザが違う"
+        elif BIND_IP and saved_ip and ip and saved_ip != ip:
+            mismatch = "IPが違う"
+        if mismatch:
+            if not st.session_state.get("auth_mismatch_logged"):
+                st.session_state["auth_mismatch_logged"] = True
+                send_event(
+                    "⚠️ **別の端末からのログイン済みURL（ログイン不可）**",
+                    {"id": data.get("discord_id", ""), "username": data.get("username", ""), "display": data.get("display", "")},
+                    ip, session_id, extra=f"理由: {mismatch}（ログイン時のIP: `{_clean(saved_ip)}`）",
+                )
             return None
         return {"id": data.get("discord_id", ""), "username": data.get("username", ""), "display": data.get("display", "")}
     except Exception as e:
@@ -335,7 +366,7 @@ def _handle_callback(db, session_id: str, ip: str):
             f"ご利用の希望がある場合は、管理者にこのID「{user['id']}」をお伝えください。"
         )
 
-    _save_login(db, state_sid, user)
+    _save_login(db, state_sid, user, ip)
     st.session_state["auth_user"] = user
     st.session_state["auth_event_logged"] = True
     send_event("✅ **ログイン成功**", user, ip, state_sid)
@@ -371,7 +402,7 @@ def require_login(db, session_id: str, ip: str):
         return user
 
     # ③ ブラウザを開き直した（同じsidで、期限内にログイン済み）
-    saved = _load_login(db, session_id)
+    saved = _load_login(db, session_id, ip)
     if saved and is_allowed(db, saved["id"]):
         st.session_state["auth_user"] = saved
         if not st.session_state.get("auth_event_logged"):
