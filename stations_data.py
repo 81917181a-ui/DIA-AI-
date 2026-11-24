@@ -422,7 +422,7 @@ KANADA_LINE_NOTES = (
 )
 
 # ---------------------------------------------------------------------------
-# 小西谷線（小西谷 - 沼池）  ※路線名は仮。正式名が決まったら LINE_DEFS の line_name と下の見出しを直す
+# 八原電鉄（小西谷 - 沼池）
 # ---------------------------------------------------------------------------
 KONISHITANI_LINE_SERVICE_TYPES = ["各停", "快速", "特急"]
 
@@ -768,9 +768,9 @@ def build_line_context_text() -> str:
         b = KANADA_LINE_STATIONS[i + 1]["name"]
         lines.append(f"- {a} - {b}: {KANADA_LINE_RUN_TIMES_SEC[i]}秒")
 
-    # --- 小西谷線 ---
+    # --- 八原電鉄 ---
     lines.append("")
-    lines.append("# 小西谷線 路線データ（小西谷 - 沼池）")
+    lines.append("# 八原電鉄 路線データ（小西谷 - 沼池）")
     lines.append(f"運行種別: {', '.join(KONISHITANI_LINE_SERVICE_TYPES)}")
     lines.append(KONISHITANI_LINE_NOTES)
     lines.append("")
