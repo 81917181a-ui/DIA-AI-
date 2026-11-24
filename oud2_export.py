@@ -90,6 +90,10 @@ from stations_data import (
     KANADA_LINE_STATIONS,
     KANADA_LINE_RUN_TIMES_SEC,
     KANADA_LINE_SERVICE_TYPES,
+    KONISHITANI_LINE_STATIONS,
+    KONISHITANI_LINE_RUN_TIMES_SEC,
+    KONISHITANI_LINE_SERVICE_TYPES,
+    KONISHITANI_LINE_EXPRESS_RUN_TIMES_SEC,
     BRT_SERVICE_TYPES,
     BRT2_SERVICE_TYPES,
     MOCHIKABE_BRT1_STATIONS,
@@ -368,6 +372,8 @@ def _compute_stops_for_service(
         if last_stop_pos is not None and express_times:
             prev_idx2 = seq[last_stop_pos]
             key = (service, stations[prev_idx2]["name"], station["name"])
+            if key not in express_times:  # 逆向き（上り）でも同じ直行所要時分を使う
+                key = (service, station["name"], stations[prev_idx2]["name"])
             if key in express_times:
                 prev_dep = stops[prev_idx2][1]
                 t = prev_dep + express_times[key]
@@ -663,6 +669,15 @@ LINE_DEFS = [
         "service_types": KANADA_LINE_SERVICE_TYPES,
         "run_times_sec": KANADA_LINE_RUN_TIMES_SEC,
         "express_times": {},
+    },
+    {
+        "key": "konishitani_line",
+        "line_name": "八原電鉄",
+        "dia_name": "AI生成 終日ダイヤ",
+        "stations": KONISHITANI_LINE_STATIONS,
+        "service_types": KONISHITANI_LINE_SERVICE_TYPES,
+        "run_times_sec": KONISHITANI_LINE_RUN_TIMES_SEC,
+        "express_times": KONISHITANI_LINE_EXPRESS_RUN_TIMES_SEC,
     },
     {
         "key": "mochikabe_brt1",
@@ -1140,9 +1155,18 @@ def _refuge_stations(line_def: dict) -> dict:
     both = {"Kudari", "Nobori"}
     for i, st in enumerate(line_def["stations"]):
         fac = str(st.get("facilities") or "")
-        if _re.search(r"尾羽原方面に(待避|退避)線", fac):
-            result[i] = {"Nobori"}
-            continue
+        mm = _re.search(r"([^\s（）()、・]+)方面に(?:待避|退避)線", fac)
+        if mm:
+            names = [x["name"] for x in line_def["stations"]]
+            tgt = mm.group(1)
+            if tgt in names:
+                j = names.index(tgt)
+                if j < i:
+                    result[i] = {"Nobori"}
+                    continue
+                if j > i:
+                    result[i] = {"Kudari"}
+                    continue
         m = _re.search(r"(\d+)線", fac)
         lines = int(m.group(1)) if m else 0
         if (lines >= 4 or "両方面に待避線" in fac or "両方面に退避線" in fac or "通過線" in fac
