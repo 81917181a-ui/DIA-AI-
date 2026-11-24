@@ -422,6 +422,46 @@ KANADA_LINE_NOTES = (
 )
 
 # ---------------------------------------------------------------------------
+# 小西谷線（小西谷 - 沼池）  ※路線名は仮。正式名が決まったら LINE_DEFS の line_name と下の見出しを直す
+# ---------------------------------------------------------------------------
+KONISHITANI_LINE_SERVICE_TYPES = ["各停", "快速", "特急"]
+
+KONISHITANI_LINE_STATIONS = [
+    {"name": "小西谷", "facilities": "", "stops": KONISHITANI_LINE_SERVICE_TYPES, "notes": "起点。"},
+    {"name": "土森", "facilities": "2面4線", "stops": KONISHITANI_LINE_SERVICE_TYPES, "notes": ""},
+    {"name": "北川町", "facilities": "2面2線", "stops": ["各停"], "notes": ""},
+    {
+        "name": "坂上",
+        "facilities": "2面3線（沼池方面に待避線あり）",
+        "stops": ["各停", "快速"],
+        "notes": "沼池方面（下り）の列車だけ待避できる。",
+    },
+    {"name": "長屋", "facilities": "2面2線", "stops": ["各停"], "notes": ""},
+    {"name": "沼池", "facilities": "2面4線", "stops": KONISHITANI_LINE_SERVICE_TYPES, "notes": "終点。"},
+]
+
+# 各停の駅間所要時分（秒）
+KONISHITANI_LINE_RUN_TIMES_SEC = [
+    80,   # 小西谷-土森
+    80,   # 土森-北川町
+    80,   # 北川町-坂上
+    60,   # 坂上-長屋
+    90,   # 長屋-沼池
+]
+
+# 快速・特急は通過駅があるため、停車駅間の直行所要時分を別途定義（往復とも同じ）
+KONISHITANI_LINE_EXPRESS_RUN_TIMES_SEC = {
+    ("快速", "土森", "坂上"): 120,
+    ("快速", "坂上", "沼池"): 130,
+    ("特急", "土森", "沼池"): 240,
+}
+
+KONISHITANI_LINE_NOTES = (
+    "各停は全駅に停車、快速は小西谷・土森・坂上・沼池のみ、特急は小西谷・土森・沼池のみ停車。"
+    "待避ができるのは土森・沼池（2面4線）と、沼池方面のみ待避可能な坂上。"
+)
+
+# ---------------------------------------------------------------------------
 # 餅壁BRT（BRT1〜BRT3、いずれも全停留所停車・双方向運行）
 # ---------------------------------------------------------------------------
 BRT_SERVICE_TYPES = ["BRT"]
@@ -582,6 +622,7 @@ SERVICE_COLORS_RGB = {
     "急行": "#d62728",
     "BRT2急行": "#d62728",
     "快速急行": "#1f4fd8",
+    "特急": "#7b2cbf",
     "区間急行": "#8e44ad",
     "エアポート急行": "#d81b8a",
 }
@@ -726,6 +767,30 @@ def build_line_context_text() -> str:
         a = KANADA_LINE_STATIONS[i]["name"]
         b = KANADA_LINE_STATIONS[i + 1]["name"]
         lines.append(f"- {a} - {b}: {KANADA_LINE_RUN_TIMES_SEC[i]}秒")
+
+    # --- 小西谷線 ---
+    lines.append("")
+    lines.append("# 小西谷線 路線データ（小西谷 - 沼池）")
+    lines.append(f"運行種別: {', '.join(KONISHITANI_LINE_SERVICE_TYPES)}")
+    lines.append(KONISHITANI_LINE_NOTES)
+    lines.append("")
+    lines.append("## 駅一覧（小西谷から沼池の順）")
+    for st in KONISHITANI_LINE_STATIONS:
+        lines.append(
+            f"- {st['name']}: 設備={st['facilities'] or '未設定'} / "
+            f"停車種別={'・'.join(st['stops'])}"
+            + (f" / 備考={st['notes']}" if st["notes"] else "")
+        )
+    lines.append("")
+    lines.append("## 各停の駅間所要時分（秒）")
+    for i in range(len(KONISHITANI_LINE_STATIONS) - 1):
+        a = KONISHITANI_LINE_STATIONS[i]["name"]
+        b = KONISHITANI_LINE_STATIONS[i + 1]["name"]
+        lines.append(f"- {a} - {b}: {KONISHITANI_LINE_RUN_TIMES_SEC[i]}秒")
+    lines.append("")
+    lines.append("## 快速・特急の停車駅間の直行所要時分（秒）")
+    for (service, a, b), sec in KONISHITANI_LINE_EXPRESS_RUN_TIMES_SEC.items():
+        lines.append(f"- [{service}] {a} - {b}: {sec}秒")
 
     # --- 餅壁BRT ---
     brt_routes = [
