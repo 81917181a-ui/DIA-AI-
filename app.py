@@ -1219,9 +1219,10 @@ def main():
                     )
                     st.markdown(reply)
             elif oud2_all_lines:
+                from oud2_export import LINE_DEFS as _ALL_LINE_DEFS
                 reply = (
-                    "尾羽急本線・千鳥支線・井問線・東阪モノレール・尾羽急高速線・金田線、"
-                    "全6路線ぶんの終日ダイヤを.oud2形式で作成しました。"
+                    f"{'・'.join(d['line_name'] for d in _ALL_LINE_DEFS)}、"
+                    f"全{len(_ALL_LINE_DEFS)}路線ぶんの終日ダイヤを.oud2形式で作成しました。"
                     "下のボタンからzipでダウンロードして、OuDiaSecondで開いてください。"
                 )
                 st.markdown(reply)
